@@ -12,7 +12,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private readonly PowerPc32RegisterFile _registers = new();
     private readonly Dictionary<int, uint> _extendedSpr = new();
-    private readonly IPowerPcSupervisorCallHandler _supervisorCallHandler;
+    private readonly Dictionary<uint, long> _supervisorCallCounters = new();
 
     public PowerPc32CpuCore()
         : this(new DefaultPowerPcSupervisorCallHandler())
@@ -21,7 +21,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     public PowerPc32CpuCore(IPowerPcSupervisorCallHandler supervisorCallHandler)
     {
-        _supervisorCallHandler = supervisorCallHandler
+        SupervisorCallHandler = supervisorCallHandler
             ?? throw new ArgumentNullException(nameof(supervisorCallHandler));
     }
 
@@ -30,6 +30,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
     public bool Halted { get; private set; }
 
     public PowerPc32RegisterFile Registers => _registers;
+
+    public IReadOnlyDictionary<uint, long> SupervisorCallCounters => _supervisorCallCounters;
+
+    public IPowerPcSupervisorCallHandler SupervisorCallHandler { get; set; }
 
     public void Reset(uint entryPoint)
     {
@@ -233,6 +237,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteSystemCall()
     {
+        _supervisorCallCounters.TryGetValue(_registers[3], out var currentCount);
+        _supervisorCallCounters[_registers[3]] = currentCount + 1;
+
         var context = new PowerPcSupervisorCallContext(
             _registers.Pc,
             _registers[3],
@@ -241,7 +248,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
             _registers[6],
             _registers[7]);
 
-        var result = _supervisorCallHandler.Handle(context);
+        var result = SupervisorCallHandler.Handle(context);
         _registers[3] = result.ReturnValue;
 
         if (result.NextProgramCounter.HasValue)
@@ -992,20 +999,24 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private static uint BuildMask(int begin, int end)
     {
-        if (begin <= end)
+        var normalizedBegin = begin & 0x1F;
+        var normalizedEnd = end & 0x1F;
+        var mask = 0u;
+        var index = normalizedBegin;
+
+        while (true)
         {
-            return CreateMaskSegment(begin, end);
+            mask |= 1u << (31 - index);
+
+            if (index == normalizedEnd)
+            {
+                break;
+            }
+
+            index = (index + 1) & 0x1F;
         }
 
-        return CreateMaskSegment(begin, 31) | CreateMaskSegment(0, end);
-    }
-
-    private static uint CreateMaskSegment(int begin, int end)
-    {
-        var left = 31 - end;
-        var right = begin;
-
-        return uint.MaxValue >> left << right;
+        return mask;
     }
 
     private static uint ReadUInt16(IMemoryBus memoryBus, uint address)

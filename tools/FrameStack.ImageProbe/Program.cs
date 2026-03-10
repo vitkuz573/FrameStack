@@ -1,5 +1,6 @@
 using System.Globalization;
 using FrameStack.Emulation.Images;
+using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
 
 if (args.Length == 0)
@@ -60,6 +61,14 @@ try
         imageBytes,
         memoryMb,
         cpuInitializer: cpuCore => ApplyRegisterOverrides(cpuCore, registerOverrides));
+    PowerPcTracingSupervisorCallHandler? supervisorTracer = null;
+    var powerPcCore = state.CpuCore as PowerPc32CpuCore;
+
+    if (powerPcCore is not null)
+    {
+        supervisorTracer = new PowerPcTracingSupervisorCallHandler(powerPcCore.SupervisorCallHandler);
+        powerPcCore.SupervisorCallHandler = supervisorTracer;
+    }
 
     if (timelineSteps > 0)
     {
@@ -76,6 +85,13 @@ try
                 : "<unmapped>";
 
             Console.WriteLine($"  #{index + 1:D4} PC=0x{pc:X8} INSN={instructionDisplay} OPCODE=0x{opcode}");
+
+            if (powerPcCore is not null)
+            {
+                Console.WriteLine(
+                    $"       R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
+                    $"R10=0x{powerPcCore.Registers[10]:X8} R27=0x{powerPcCore.Registers[27]:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
+            }
 
             var stepSummary = state.Machine.Run(1);
 
@@ -96,6 +112,13 @@ try
     Console.WriteLine($"ExecutedInstructions: {runSummary.ExecutedInstructions}");
     Console.WriteLine($"Halted: {runSummary.Halted}");
     Console.WriteLine($"FinalProgramCounter: 0x{runSummary.FinalProgramCounter:X8}");
+    if (powerPcCore is not null)
+    {
+        Console.WriteLine(
+            $"FinalRegisters: R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
+            $"R8=0x{powerPcCore.Registers[8]:X8} R9=0x{powerPcCore.Registers[9]:X8} R10=0x{powerPcCore.Registers[10]:X8} " +
+            $"R27=0x{powerPcCore.Registers[27]:X8} R29=0x{powerPcCore.Registers[29]:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
+    }
     Console.WriteLine("HotSpots:");
 
     foreach (var hotSpot in traceSummary.HotSpots)
@@ -110,6 +133,43 @@ try
         {
             Console.WriteLine($"  PC=0x{hotSpot.ProgramCounter:X8} Hits={hotSpot.Hits} INSN=<unmapped>");
         }
+    }
+
+    if (state.CpuCore is PowerPc32CpuCore powerPc &&
+        powerPc.SupervisorCallCounters.Count > 0)
+    {
+        Console.WriteLine("SupervisorCalls:");
+
+        foreach (var (serviceCode, hits) in powerPc.SupervisorCallCounters
+                     .OrderByDescending(entry => entry.Value)
+                     .ThenBy(entry => entry.Key)
+                     .Take(12))
+        {
+            Console.WriteLine($"  Service=0x{serviceCode:X8} Hits={hits}");
+        }
+    }
+
+    if (supervisorTracer is not null &&
+        supervisorTracer.SubserviceCounters.Count > 0)
+    {
+        Console.WriteLine("SupervisorSubcalls:");
+
+        foreach (var (subcall, hits) in supervisorTracer.SubserviceCounters
+                     .OrderByDescending(entry => entry.Value)
+                     .ThenBy(entry => entry.Key.ServiceCode)
+                     .ThenBy(entry => entry.Key.SubserviceCode)
+                     .Take(12))
+        {
+            Console.WriteLine(
+                $"  Service=0x{subcall.ServiceCode:X8} Sub=0x{subcall.SubserviceCode:X8} Hits={hits}");
+        }
+    }
+
+    if (supervisorTracer is not null &&
+        supervisorTracer.ConsoleOutput.Length > 0)
+    {
+        Console.WriteLine("ConsoleOutput:");
+        Console.WriteLine(supervisorTracer.ConsoleOutput);
     }
 
     return 0;

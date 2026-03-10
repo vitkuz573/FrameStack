@@ -1,0 +1,71 @@
+using System.Text;
+
+namespace FrameStack.Emulation.PowerPc32;
+
+public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCallHandler
+{
+    private const uint CiscoMonitorDispatcherService = 0x2B;
+    private const uint PutCharacterService = 0x01;
+
+    private readonly IPowerPcSupervisorCallHandler _innerHandler;
+    private readonly Dictionary<uint, long> _serviceCounters = new();
+    private readonly Dictionary<PowerPcSupervisorSubcallKey, long> _subserviceCounters = new();
+    private readonly StringBuilder _consoleOutput = new();
+
+    public PowerPcTracingSupervisorCallHandler(IPowerPcSupervisorCallHandler innerHandler)
+    {
+        _innerHandler = innerHandler
+            ?? throw new ArgumentNullException(nameof(innerHandler));
+    }
+
+    public IReadOnlyDictionary<uint, long> ServiceCounters => _serviceCounters;
+
+    public IReadOnlyDictionary<PowerPcSupervisorSubcallKey, long> SubserviceCounters => _subserviceCounters;
+
+    public string ConsoleOutput => _consoleOutput.ToString();
+
+    public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
+    {
+        IncrementCounter(_serviceCounters, context.ServiceCode);
+
+        if (context.ServiceCode == CiscoMonitorDispatcherService)
+        {
+            var subcall = new PowerPcSupervisorSubcallKey(
+                context.ServiceCode,
+                context.Argument0);
+
+            IncrementCounter(_subserviceCounters, subcall);
+        }
+
+        if (context.ServiceCode == PutCharacterService)
+        {
+            AppendConsoleCharacter(unchecked((byte)context.Argument0));
+        }
+
+        return _innerHandler.Handle(context);
+    }
+
+    private static void IncrementCounter<TKey>(IDictionary<TKey, long> dictionary, TKey key)
+        where TKey : notnull
+    {
+        dictionary.TryGetValue(key, out var currentCount);
+        dictionary[key] = currentCount + 1;
+    }
+
+    private void AppendConsoleCharacter(byte value)
+    {
+        switch (value)
+        {
+            case (byte)'\r':
+            case (byte)'\n':
+            case (byte)'\t':
+                _consoleOutput.Append((char)value);
+                return;
+        }
+
+        if (value is >= 0x20 and <= 0x7E)
+        {
+            _consoleOutput.Append((char)value);
+        }
+    }
+}

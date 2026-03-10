@@ -55,6 +55,12 @@ Arguments:
 - `timeline-steps` (optional, default `0`)
 - `register=value` overrides (optional, PowerPC only): `r0..r31`, `lr`, `ctr`, `cr`, `xer`, `pc`
 
+Probe output includes:
+
+- execution hot spots and final register snapshot;
+- supervisor-call counters/subcall counters;
+- captured console stream emitted through firmware monitor calls.
+
 ## Main API
 
 - `POST /api/v1/images` - register a local image artifact.

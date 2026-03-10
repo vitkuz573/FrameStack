@@ -41,7 +41,7 @@ public sealed class RuntimeImageBootstrapper
             memoryBus.LoadBytes(segment.VirtualAddress, segment.Data);
         }
 
-        var cpuCore = CreateCpuCore(loadedImage);
+        var cpuCore = CreateCpuCore(loadedImage, memoryMb);
         var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
 
         cpuInitializer?.Invoke(cpuCore);
@@ -54,7 +54,7 @@ public sealed class RuntimeImageBootstrapper
             loadedImage.Segments.Count,
             inspection.Summary);
 
-        return new RuntimeSessionState(runtimeHandle, machine, report);
+        return new RuntimeSessionState(runtimeHandle, machine, report, cpuCore);
     }
 
     private IImageLoader ResolveLoader(ImageInspectionResult inspection)
@@ -69,7 +69,7 @@ public sealed class RuntimeImageBootstrapper
         throw new NotSupportedException($"No loader registered for image format '{inspection.Format}'.");
     }
 
-    private static FrameStack.Emulation.Abstractions.ICpuCore CreateCpuCore(LoadedImage loadedImage)
+    private static FrameStack.Emulation.Abstractions.ICpuCore CreateCpuCore(LoadedImage loadedImage, int memoryMb)
     {
         if (loadedImage.Architecture == ImageArchitecture.Mips32 &&
             loadedImage.Endianness == ImageEndianness.BigEndian)
@@ -86,7 +86,8 @@ public sealed class RuntimeImageBootstrapper
         if (loadedImage.Architecture == ImageArchitecture.PowerPc32 &&
             loadedImage.Endianness == ImageEndianness.BigEndian)
         {
-            return new PowerPc32CpuCore();
+            var reportedMemoryBytes = checked((uint)memoryMb * 1024u * 1024u);
+            return new PowerPc32CpuCore(new DefaultPowerPcSupervisorCallHandler(reportedMemoryBytes));
         }
 
         throw new NotSupportedException(

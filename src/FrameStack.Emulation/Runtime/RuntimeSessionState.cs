@@ -1,8 +1,10 @@
 using FrameStack.Emulation.Core;
+using FrameStack.Emulation.Abstractions;
 
 namespace FrameStack.Emulation.Runtime;
 
 public sealed record RuntimeSessionState(
     string Handle,
     EmulationMachine Machine,
-    RuntimeBootstrapReport BootstrapReport);
+    RuntimeBootstrapReport BootstrapReport,
+    ICpuCore CpuCore);
