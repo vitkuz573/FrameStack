@@ -38,6 +38,8 @@ internal readonly struct PowerPcInstruction(uint word)
 
     public int ConditionRegisterField => (int)((Word >> 23) & 0x7);
 
+    public int ConditionRegisterMask => (int)((Word >> 12) & 0xFF);
+
     public int BranchDisplacementImmediate
     {
         get

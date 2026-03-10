@@ -6,6 +6,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 {
     private const int LinkRegisterSpr = 8;
     private const int CounterRegisterSpr = 9;
+    private const uint DcbzLineSize = 32;
 
     private const uint XerSoMask = 0x8000_0000;
     private const uint XerCaMask = 0x2000_0000;
@@ -13,6 +14,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private readonly PowerPc32RegisterFile _registers = new();
     private readonly Dictionary<int, uint> _extendedSpr = new();
     private readonly Dictionary<uint, long> _supervisorCallCounters = new();
+    private uint _machineStateRegister;
+    private ulong _timeBaseCounter;
 
     public PowerPc32CpuCore()
         : this(new DefaultPowerPcSupervisorCallHandler())
@@ -39,6 +42,64 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         _registers.Pc = entryPoint;
         Halted = false;
+    }
+
+    public PowerPc32CpuSnapshot CreateSnapshot()
+    {
+        var gpr = new uint[32];
+
+        for (var index = 0; index < gpr.Length; index++)
+        {
+            gpr[index] = _registers[index];
+        }
+
+        return new PowerPc32CpuSnapshot(
+            gpr,
+            _registers.Pc,
+            _registers.Lr,
+            _registers.Ctr,
+            _registers.Cr,
+            _registers.Xer,
+            Halted,
+            _machineStateRegister,
+            _timeBaseCounter,
+            _extendedSpr.ToDictionary(entry => entry.Key, entry => entry.Value),
+            _supervisorCallCounters.ToDictionary(entry => entry.Key, entry => entry.Value));
+    }
+
+    public void RestoreSnapshot(PowerPc32CpuSnapshot snapshot)
+    {
+        if (snapshot.GeneralPurposeRegisters.Length != 32)
+        {
+            throw new InvalidOperationException(
+                $"CPU snapshot has invalid GPR length {snapshot.GeneralPurposeRegisters.Length}, expected 32.");
+        }
+
+        for (var index = 0; index < snapshot.GeneralPurposeRegisters.Length; index++)
+        {
+            _registers[index] = snapshot.GeneralPurposeRegisters[index];
+        }
+
+        _registers.Pc = snapshot.ProgramCounter;
+        _registers.Lr = snapshot.LinkRegister;
+        _registers.Ctr = snapshot.CounterRegister;
+        _registers.Cr = snapshot.ConditionRegister;
+        _registers.Xer = snapshot.FixedPointExceptionRegister;
+        Halted = snapshot.Halted;
+        _machineStateRegister = snapshot.MachineStateRegister;
+        _timeBaseCounter = snapshot.TimeBaseCounter;
+
+        _extendedSpr.Clear();
+        foreach (var (spr, value) in snapshot.ExtendedSpecialPurposeRegisters)
+        {
+            _extendedSpr[spr] = value;
+        }
+
+        _supervisorCallCounters.Clear();
+        foreach (var (serviceCode, hits) in snapshot.SupervisorCallCounters)
+        {
+            _supervisorCallCounters[serviceCode] = hits;
+        }
     }
 
     public void ExecuteCycle(IMemoryBus memoryBus)
@@ -433,6 +494,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
             unchecked((byte)_registers[instruction.Rs]));
     }
 
+    private void WriteIndexedHalfWord(IMemoryBus memoryBus, PowerPcInstruction instruction)
+    {
+        WriteUInt16(
+            memoryBus,
+            ComputeIndexedAddress(instruction),
+            unchecked((ushort)_registers[instruction.Rs]));
+    }
+
     private void ExecuteBranchImmediate(PowerPcInstruction instruction, uint currentPc)
     {
         if (instruction.Link)
@@ -582,6 +651,13 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case 8: // subfc
                 ExecuteSubtractFrom(instruction, withCarry: true, useExtendedCarry: false);
                 break;
+            case 11: // mulhwu
+                ExecuteMultiplyHighWordUnsigned(instruction);
+                break;
+            case 19: // mfcr
+                _registers[instruction.Rt] = _registers.Cr;
+                _registers.Pc += 4;
+                break;
             case 23: // lwzx
                 _registers[instruction.Rt] = ReadIndexedWord(memoryBus, instruction);
                 _registers.Pc += 4;
@@ -599,11 +675,21 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case 40: // subf
                 ExecuteSubtractFrom(instruction, withCarry: false, useExtendedCarry: false);
                 break;
+            case 86: // dcbf
+                _registers.Pc += 4;
+                break;
             case 60: // andc
                 ExecuteAndWithComplement(instruction);
                 break;
+            case 75: // mulhw
+                ExecuteMultiplyHighWordSigned(instruction);
+                break;
             case 87: // lbzx
                 _registers[instruction.Rt] = ReadIndexedByte(memoryBus, instruction);
+                _registers.Pc += 4;
+                break;
+            case 83: // mfmsr
+                _registers[instruction.Rt] = _machineStateRegister;
                 _registers.Pc += 4;
                 break;
             case 104: // neg
@@ -615,6 +701,13 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case 136: // subfe
                 ExecuteSubtractFrom(instruction, withCarry: true, useExtendedCarry: true);
                 break;
+            case 144: // mtcrf
+                ExecuteMoveToConditionRegisterFields(instruction);
+                break;
+            case 146: // mtmsr
+                _machineStateRegister = _registers[instruction.Rs];
+                _registers.Pc += 4;
+                break;
             case 138: // adde
                 ExecuteAddExtended(instruction);
                 break;
@@ -622,8 +715,24 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 WriteIndexedWord(memoryBus, instruction);
                 _registers.Pc += 4;
                 break;
+            case 202: // addze
+                ExecuteAddToZeroExtended(instruction);
+                break;
             case 215: // stbx
                 WriteIndexedByte(memoryBus, instruction);
+                _registers.Pc += 4;
+                break;
+            case 234: // addme
+                ExecuteAddToMinusOneExtended(instruction);
+                break;
+            case 235: // mullw
+                ExecuteMultiplyLowWord(instruction);
+                break;
+            case 246: // dcbtst
+            case 278: // dcbt
+                _registers.Pc += 4;
+                break;
+            case 306: // tlbie
                 _registers.Pc += 4;
                 break;
             case 266: // add
@@ -640,8 +749,21 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers[instruction.Rt] = ReadSpr(instruction.Spr);
                 _registers.Pc += 4;
                 break;
+            case 407: // sthx
+                WriteIndexedHalfWord(memoryBus, instruction);
+                _registers.Pc += 4;
+                break;
+            case 370: // tlbia
+                _registers.Pc += 4;
+                break;
+            case 371: // mftb/mftbu
+                ExecuteMoveFromTimeBase(instruction);
+                break;
             case 444: // or (mr alias)
                 ExecuteOrRegister(instruction);
+                break;
+            case 459: // divwu
+                ExecuteDivideWordUnsigned(instruction);
                 break;
             case 467: // mtspr
                 WriteSpr(instruction.Spr, _registers[instruction.Rs]);
@@ -650,22 +772,43 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case 476: // nand
                 ExecuteNand(instruction);
                 break;
+            case 491: // divw
+                ExecuteDivideWordSigned(instruction);
+                break;
+            case 470: // dcbi
+                _registers.Pc += 4;
+                break;
             case 536: // srw
                 ExecuteShiftRightWord(instruction);
                 break;
             case 598: // sync
                 _registers.Pc += 4;
                 break;
+            case 597: // lswi
+                ExecuteLoadStringWordImmediate(memoryBus, instruction);
+                break;
+            case 854: // eieio
+                _registers.Pc += 4;
+                break;
             case 824: // srawi
                 ExecuteShiftRightArithmeticImmediate(instruction);
+                break;
+            case 725: // stswi
+                ExecuteStoreStringWordImmediate(memoryBus, instruction);
                 break;
             case 922: // extsh
                 _registers[instruction.Ra] = unchecked((uint)(short)(_registers[instruction.Rs] & 0xFFFF));
                 _registers.Pc += 4;
                 break;
+            case 982: // icbi
+                _registers.Pc += 4;
+                break;
             case 954: // extsb
                 _registers[instruction.Ra] = unchecked((uint)(sbyte)(_registers[instruction.Rs] & 0xFF));
                 _registers.Pc += 4;
+                break;
+            case 1014: // dcbz
+                ExecuteDataCacheBlockSetToZero(memoryBus, instruction);
                 break;
             default:
                 throw new NotSupportedException(
@@ -889,6 +1032,242 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         _registers.Pc += 4;
+    }
+
+    private void ExecuteMultiplyHighWordUnsigned(PowerPcInstruction instruction)
+    {
+        var product = (ulong)_registers[instruction.Ra] * _registers[instruction.Rb];
+        var result = unchecked((uint)(product >> 32));
+        _registers[instruction.Rt] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteMultiplyHighWordSigned(PowerPcInstruction instruction)
+    {
+        var left = unchecked((long)(int)_registers[instruction.Ra]);
+        var right = unchecked((long)(int)_registers[instruction.Rb]);
+        var product = left * right;
+        var result = unchecked((uint)(product >> 32));
+        _registers[instruction.Rt] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteMultiplyLowWord(PowerPcInstruction instruction)
+    {
+        var left = unchecked((int)_registers[instruction.Ra]);
+        var right = unchecked((int)_registers[instruction.Rb]);
+        var result = unchecked((uint)(left * right));
+        _registers[instruction.Rt] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteDivideWordUnsigned(PowerPcInstruction instruction)
+    {
+        var divisor = _registers[instruction.Rb];
+        var dividend = _registers[instruction.Ra];
+        var result = divisor == 0
+            ? 0u
+            : dividend / divisor;
+
+        _registers[instruction.Rt] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteDivideWordSigned(PowerPcInstruction instruction)
+    {
+        var divisor = unchecked((int)_registers[instruction.Rb]);
+        var dividend = unchecked((int)_registers[instruction.Ra]);
+        int resultSigned;
+
+        if (divisor == 0)
+        {
+            resultSigned = 0;
+        }
+        else if (dividend == int.MinValue && divisor == -1)
+        {
+            resultSigned = int.MinValue;
+        }
+        else
+        {
+            resultSigned = dividend / divisor;
+        }
+
+        var result = unchecked((uint)resultSigned);
+        _registers[instruction.Rt] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteDataCacheBlockSetToZero(IMemoryBus memoryBus, PowerPcInstruction instruction)
+    {
+        var address = ComputeIndexedAddress(instruction);
+        var alignedAddress = address & ~(DcbzLineSize - 1);
+
+        for (var offset = 0u; offset < DcbzLineSize; offset++)
+        {
+            memoryBus.WriteByte(alignedAddress + offset, 0);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteMoveToConditionRegisterFields(PowerPcInstruction instruction)
+    {
+        var source = _registers[instruction.Rs];
+        var fieldMask = instruction.ConditionRegisterMask & 0xFF;
+
+        for (var fieldIndex = 0; fieldIndex < 8; fieldIndex++)
+        {
+            var selectorBit = 1 << (7 - fieldIndex);
+
+            if ((fieldMask & selectorBit) == 0)
+            {
+                continue;
+            }
+
+            var shift = (7 - fieldIndex) * 4;
+            var fieldValue = (source >> shift) & 0xFu;
+            WriteCrField(fieldIndex, fieldValue);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteAddToZeroExtended(PowerPcInstruction instruction)
+    {
+        var carryIn = GetCarryFlag() ? 1UL : 0UL;
+        var sum = (ulong)_registers[instruction.Ra] + carryIn;
+        var result = unchecked((uint)sum);
+        _registers[instruction.Rt] = result;
+        SetCarryFlag((sum >> 32) != 0);
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteAddToMinusOneExtended(PowerPcInstruction instruction)
+    {
+        var carryIn = GetCarryFlag() ? 1UL : 0UL;
+        var sum = (ulong)_registers[instruction.Ra] + 0xFFFF_FFFFUL + carryIn;
+        var result = unchecked((uint)sum);
+        _registers[instruction.Rt] = result;
+        SetCarryFlag((sum >> 32) != 0);
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteMoveFromTimeBase(PowerPcInstruction instruction)
+    {
+        _timeBaseCounter++;
+
+        var value = instruction.Spr switch
+        {
+            268 => unchecked((uint)_timeBaseCounter),          // TBL
+            269 => unchecked((uint)(_timeBaseCounter >> 32)), // TBU
+            _ => 0u
+        };
+
+        _registers[instruction.Rt] = value;
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteLoadStringWordImmediate(IMemoryBus memoryBus, PowerPcInstruction instruction)
+    {
+        var address = instruction.Ra == 0 ? 0u : _registers[instruction.Ra];
+        var bytesRemaining = GetStringWordImmediateByteCount(instruction.Rb);
+        var destinationRegister = instruction.Rt;
+
+        while (bytesRemaining > 0)
+        {
+            uint value = 0;
+
+            for (var byteIndex = 0; byteIndex < 4; byteIndex++)
+            {
+                value <<= 8;
+
+                if (bytesRemaining == 0)
+                {
+                    continue;
+                }
+
+                value |= memoryBus.ReadByte(address);
+                address++;
+                bytesRemaining--;
+            }
+
+            _registers[destinationRegister] = value;
+            destinationRegister = (destinationRegister + 1) & 0x1F;
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteStoreStringWordImmediate(IMemoryBus memoryBus, PowerPcInstruction instruction)
+    {
+        var address = instruction.Ra == 0 ? 0u : _registers[instruction.Ra];
+        var bytesRemaining = GetStringWordImmediateByteCount(instruction.Rb);
+        var sourceRegister = instruction.Rs;
+
+        while (bytesRemaining > 0)
+        {
+            var sourceValue = _registers[sourceRegister];
+
+            for (var byteIndex = 0; byteIndex < 4 && bytesRemaining > 0; byteIndex++)
+            {
+                var shift = 24 - (byteIndex * 8);
+                memoryBus.WriteByte(address, unchecked((byte)(sourceValue >> shift)));
+                address++;
+                bytesRemaining--;
+            }
+
+            sourceRegister = (sourceRegister + 1) & 0x1F;
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private static int GetStringWordImmediateByteCount(int immediate)
+    {
+        var byteCount = immediate & 0x1F;
+        return byteCount == 0 ? 32 : byteCount;
     }
 
     private uint ReadSpr(int spr)

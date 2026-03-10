@@ -11,6 +11,8 @@ public sealed class SparseMemoryBus : IMemoryBus
     private readonly ulong _maxMappedBytes;
     private readonly Dictionary<uint, byte[]> _pages = new();
 
+    public ulong MaxMappedBytes => _maxMappedBytes;
+
     public SparseMemoryBus(ulong maxMappedBytes)
     {
         if (maxMappedBytes == 0)
@@ -107,6 +109,46 @@ public sealed class SparseMemoryBus : IMemoryBus
 
             Buffer.BlockCopy(bytes, sourceOffset, page, pageOffset, copyLength);
             sourceOffset += copyLength;
+        }
+    }
+
+    public IReadOnlyList<SparseMemoryPageSnapshot> CreateSnapshot()
+    {
+        var snapshots = new List<SparseMemoryPageSnapshot>(_pages.Count);
+
+        foreach (var (pageIndex, pageData) in _pages.OrderBy(entry => entry.Key))
+        {
+            var dataCopy = new byte[PageSize];
+            Buffer.BlockCopy(pageData, 0, dataCopy, 0, PageSize);
+            snapshots.Add(new SparseMemoryPageSnapshot(pageIndex, dataCopy));
+        }
+
+        return snapshots;
+    }
+
+    public void RestoreSnapshot(IEnumerable<SparseMemoryPageSnapshot> pages)
+    {
+        _pages.Clear();
+
+        foreach (var page in pages)
+        {
+            if (page.Data.Length != PageSize)
+            {
+                throw new InvalidOperationException(
+                    $"Sparse page {page.PageIndex} has invalid length {page.Data.Length}, expected {PageSize}.");
+            }
+
+            var pageCopy = new byte[PageSize];
+            Buffer.BlockCopy(page.Data, 0, pageCopy, 0, PageSize);
+            _pages[page.PageIndex] = pageCopy;
+        }
+
+        var mappedBytes = checked((ulong)_pages.Count * PageSize);
+
+        if (mappedBytes > _maxMappedBytes)
+        {
+            throw new InvalidOperationException(
+                $"Restored memory exceeds configured limit {_maxMappedBytes} bytes.");
         }
     }
 

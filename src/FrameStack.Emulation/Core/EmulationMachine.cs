@@ -23,6 +23,8 @@ public sealed class EmulationMachine
 
     public uint ProgramCounter => _cpu.ProgramCounter;
 
+    public IMemoryBus MemoryBus => _memoryBus;
+
     public void LoadImage(uint baseAddress, byte[] imageBytes)
     {
         _memoryBus.LoadBytes(baseAddress, imageBytes);
