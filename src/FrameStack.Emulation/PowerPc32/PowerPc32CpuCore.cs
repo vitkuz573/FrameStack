@@ -170,7 +170,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteMultiplyLowImmediate(PowerPcInstruction instruction)
     {
-        var left = instruction.Ra == 0 ? 0 : unchecked((int)_registers[instruction.Ra]);
+        var left = unchecked((int)_registers[instruction.Ra]);
         var result = unchecked(left * instruction.Simm);
         _registers[instruction.Rt] = unchecked((uint)result);
         _registers.Pc += 4;
@@ -190,7 +190,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteAddImmediateCarrying(PowerPcInstruction instruction, bool recordCondition)
     {
-        var baseValue = instruction.Ra == 0 ? 0u : _registers[instruction.Ra];
+        var baseValue = _registers[instruction.Ra];
         var immediate = unchecked((uint)instruction.Simm);
         var sum = (ulong)baseValue + immediate;
         var result = unchecked((uint)sum);
@@ -226,7 +226,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteSubtractFromImmediateCarrying(PowerPcInstruction instruction)
     {
-        var source = instruction.Ra == 0 ? 0u : _registers[instruction.Ra];
+        var source = _registers[instruction.Ra];
         var immediate = unchecked((uint)instruction.Simm);
         var result = unchecked(immediate - source);
 
@@ -308,49 +308,58 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteLoadWordAndZero(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase);
-        _registers[instruction.Rt] = memoryBus.ReadUInt32(address);
+        var address = ComputeEffectiveAddress(instruction);
+        var value = memoryBus.ReadUInt32(address);
+        _registers[instruction.Rt] = value;
+        UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
 
     private void ExecuteLoadByteAndZero(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase);
-        _registers[instruction.Rt] = memoryBus.ReadByte(address);
+        var address = ComputeEffectiveAddress(instruction);
+        var value = memoryBus.ReadByte(address);
+        _registers[instruction.Rt] = value;
+        UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
 
     private void ExecuteLoadHalfWordAndZero(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase);
-        _registers[instruction.Rt] = ReadUInt16(memoryBus, address);
+        var address = ComputeEffectiveAddress(instruction);
+        var value = ReadUInt16(memoryBus, address);
+        _registers[instruction.Rt] = value;
+        UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
 
     private void ExecuteStoreWord(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase);
+        var address = ComputeEffectiveAddress(instruction);
         memoryBus.WriteUInt32(address, _registers[instruction.Rs]);
+        UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
 
     private void ExecuteStoreByte(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase);
+        var address = ComputeEffectiveAddress(instruction);
         memoryBus.WriteByte(address, unchecked((byte)_registers[instruction.Rs]));
+        UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
 
     private void ExecuteStoreHalfWord(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase);
+        var address = ComputeEffectiveAddress(instruction);
         WriteUInt16(memoryBus, address, unchecked((ushort)_registers[instruction.Rs]));
+        UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
 
     private void ExecuteLoadMultipleWords(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase: false);
+        var address = ComputeEffectiveAddress(instruction);
 
         for (var registerIndex = instruction.Rt; registerIndex < 32; registerIndex++)
         {
@@ -363,7 +372,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteStoreMultipleWords(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        var address = ComputeEffectiveAddress(instruction, updateBase: false);
+        var address = ComputeEffectiveAddress(instruction);
 
         for (var registerIndex = instruction.Rt; registerIndex < 32; registerIndex++)
         {
@@ -374,17 +383,21 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _registers.Pc += 4;
     }
 
-    private uint ComputeEffectiveAddress(PowerPcInstruction instruction, bool updateBase)
+    private uint ComputeEffectiveAddress(PowerPcInstruction instruction)
     {
         var baseValue = instruction.Ra == 0 ? 0u : _registers[instruction.Ra];
-        var effectiveAddress = unchecked(baseValue + (uint)instruction.Simm);
+        return unchecked(baseValue + (uint)instruction.Simm);
+    }
 
+    private void UpdateBaseRegisterIfNeeded(
+        PowerPcInstruction instruction,
+        bool updateBase,
+        uint effectiveAddress)
+    {
         if (updateBase && instruction.Ra != 0)
         {
             _registers[instruction.Ra] = effectiveAddress;
         }
-
-        return effectiveAddress;
     }
 
     private uint ComputeIndexedAddress(PowerPcInstruction instruction)
@@ -817,8 +830,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteShiftLeftWord(PowerPcInstruction instruction)
     {
-        var shift = (int)(_registers[instruction.Rb] & 0x1F);
-        var result = _registers[instruction.Rs] << shift;
+        var shift = _registers[instruction.Rb] & 0x3F;
+        var result = shift >= 32
+            ? 0u
+            : _registers[instruction.Rs] << (int)shift;
 
         _registers[instruction.Ra] = result;
 
@@ -832,8 +847,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteShiftRightWord(PowerPcInstruction instruction)
     {
-        var shift = (int)(_registers[instruction.Rb] & 0x1F);
-        var result = _registers[instruction.Rs] >> shift;
+        var shift = _registers[instruction.Rb] & 0x3F;
+        var result = shift >= 32
+            ? 0u
+            : _registers[instruction.Rs] >> (int)shift;
 
         _registers[instruction.Ra] = result;
 

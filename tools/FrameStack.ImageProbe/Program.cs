@@ -10,7 +10,7 @@ if (args.Length == 0)
 }
 
 var imagePath = Path.GetFullPath(args[0]);
-var instructionBudget = ParseOrDefault(args, 1, 2048);
+var instructionBudget = ParseInstructionBudget(args, 1, 2048);
 var memoryMb = ParseOrDefault(args, 2, 256);
 var timelineSteps = ParseOrDefault(args, 3, 0);
 var registerOverrides = ParseRegisterOverrides(args.Skip(4).ToArray());
@@ -119,6 +119,7 @@ try
             $"R8=0x{powerPcCore.Registers[8]:X8} R9=0x{powerPcCore.Registers[9]:X8} R10=0x{powerPcCore.Registers[10]:X8} " +
             $"R27=0x{powerPcCore.Registers[27]:X8} R29=0x{powerPcCore.Registers[29]:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
     }
+    PrintFirmwareGlobals(state.Machine);
     Console.WriteLine("HotSpots:");
 
     foreach (var hotSpot in traceSummary.HotSpots)
@@ -192,6 +193,42 @@ static int ParseOrDefault(string[] input, int index, int fallback)
     return int.TryParse(input[index], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
         ? parsed
         : fallback;
+}
+
+static int ParseInstructionBudget(string[] input, int index, int fallback)
+{
+    if (input.Length <= index)
+    {
+        return fallback;
+    }
+
+    var token = input[index];
+
+    if (int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+    {
+        return parsed > 0
+            ? parsed
+            : fallback;
+    }
+
+    if (!long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedLong))
+    {
+        return fallback;
+    }
+
+    if (parsedLong <= 0)
+    {
+        return fallback;
+    }
+
+    if (parsedLong > int.MaxValue)
+    {
+        Console.WriteLine(
+            $"Instruction budget {parsedLong} exceeds {int.MaxValue}; clamping to {int.MaxValue}.");
+        return int.MaxValue;
+    }
+
+    return (int)parsedLong;
 }
 
 static Dictionary<string, uint> ParseRegisterOverrides(string[] tokens)
@@ -343,4 +380,29 @@ static bool TryReadWordAtVirtualAddress(
             imageBytes[fileOffset + 3];
 
     return true;
+}
+
+static void PrintFirmwareGlobals(FrameStack.Emulation.Core.EmulationMachine machine)
+{
+    // Cisco ROM monitor global workspace in this image.
+    var globals = new (string Name, uint Address)[]
+    {
+        ("g_0x8000BCEC", 0x8000BCEC),
+        ("g_0x8000BCF0", 0x8000BCF0),
+        ("g_0x8000BCF4", 0x8000BCF4),
+        ("g_0x8000BCF8", 0x8000BCF8),
+        ("g_0x8000BCFC", 0x8000BCFC),
+        ("g_0x8000BD00", 0x8000BD00),
+        ("g_0x8000BD04", 0x8000BD04),
+        ("g_0x8000BD4C", 0x8000BD4C),
+        ("g_0x8000BD50", 0x8000BD50),
+        ("g_0x8000BD54", 0x8000BD54),
+    };
+
+    Console.WriteLine("FirmwareGlobals:");
+
+    foreach (var global in globals)
+    {
+        Console.WriteLine($"  {global.Name}=0x{machine.ReadUInt32(global.Address):X8}");
+    }
 }

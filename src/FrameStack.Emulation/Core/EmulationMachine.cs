@@ -90,4 +90,14 @@ public sealed class EmulationMachine
 
         return new ExecutionTraceSummary(summary, hotSpots);
     }
+
+    public byte ReadByte(uint address)
+    {
+        return _memoryBus.ReadByte(address);
+    }
+
+    public uint ReadUInt32(uint address)
+    {
+        return _memoryBus.ReadUInt32(address);
+    }
 }

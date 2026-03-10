@@ -1,4 +1,5 @@
 using FrameStack.Emulation.Abstractions;
+using System.Buffers.Binary;
 
 namespace FrameStack.Emulation.Memory;
 
@@ -32,18 +33,14 @@ public sealed class ArrayMemoryBus : IMemoryBus
 
     public uint ReadUInt32(uint address)
     {
-        return ((uint)ReadByte(address) << 24) |
-               ((uint)ReadByte(address + 1) << 16) |
-               ((uint)ReadByte(address + 2) << 8) |
-               ReadByte(address + 3);
+        var offset = ResolveOffset(address, sizeof(uint));
+        return BinaryPrimitives.ReadUInt32BigEndian(_memory.AsSpan(offset, sizeof(uint)));
     }
 
     public void WriteUInt32(uint address, uint value)
     {
-        WriteByte(address, (byte)(value >> 24));
-        WriteByte(address + 1, (byte)(value >> 16));
-        WriteByte(address + 2, (byte)(value >> 8));
-        WriteByte(address + 3, (byte)value);
+        var offset = ResolveOffset(address, sizeof(uint));
+        BinaryPrimitives.WriteUInt32BigEndian(_memory.AsSpan(offset, sizeof(uint)), value);
     }
 
     public void LoadBytes(uint baseAddress, byte[] bytes)
