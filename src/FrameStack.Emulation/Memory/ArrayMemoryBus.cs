@@ -18,24 +18,32 @@ public sealed class ArrayMemoryBus : IMemoryBus
         _memory = new byte[sizeBytes];
     }
 
+    public byte ReadByte(uint address)
+    {
+        var offset = ResolveOffset(address, sizeof(byte));
+        return _memory[offset];
+    }
+
+    public void WriteByte(uint address, byte value)
+    {
+        var offset = ResolveOffset(address, sizeof(byte));
+        _memory[offset] = value;
+    }
+
     public uint ReadUInt32(uint address)
     {
-        var offset = ResolveOffset(address, sizeof(uint));
-
-        return ((uint)_memory[offset] << 24) |
-               ((uint)_memory[offset + 1] << 16) |
-               ((uint)_memory[offset + 2] << 8) |
-               _memory[offset + 3];
+        return ((uint)ReadByte(address) << 24) |
+               ((uint)ReadByte(address + 1) << 16) |
+               ((uint)ReadByte(address + 2) << 8) |
+               ReadByte(address + 3);
     }
 
     public void WriteUInt32(uint address, uint value)
     {
-        var offset = ResolveOffset(address, sizeof(uint));
-
-        _memory[offset] = (byte)(value >> 24);
-        _memory[offset + 1] = (byte)(value >> 16);
-        _memory[offset + 2] = (byte)(value >> 8);
-        _memory[offset + 3] = (byte)value;
+        WriteByte(address, (byte)(value >> 24));
+        WriteByte(address + 1, (byte)(value >> 16));
+        WriteByte(address + 2, (byte)(value >> 8));
+        WriteByte(address + 3, (byte)value);
     }
 
     public void LoadBytes(uint baseAddress, byte[] bytes)

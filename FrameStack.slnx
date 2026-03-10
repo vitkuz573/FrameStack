@@ -12,4 +12,7 @@
     <Project Path="tests/FrameStack.Domain.UnitTests/FrameStack.Domain.UnitTests.csproj" />
     <Project Path="tests/FrameStack.Emulation.UnitTests/FrameStack.Emulation.UnitTests.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/FrameStack.ImageProbe/FrameStack.ImageProbe.csproj" />
+  </Folder>
 </Solution>

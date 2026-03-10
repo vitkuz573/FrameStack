@@ -1,6 +1,6 @@
 # FrameStack
 
-`FrameStack` is a next-generation Cisco network simulation platform foundation built with enterprise architecture principles.
+`FrameStack` is a next-generation Cisco network emulation platform foundation built with enterprise architecture principles.
 
 ## Current Foundation
 
@@ -12,7 +12,12 @@
   - `EmulationSession` for runtime lifecycle orchestration.
 - Native execution core baseline:
   - `FrameStack.Emulation` with `CPU core / memory bus / machine loop`;
-  - initial `MIPS32` instruction support (NOP, ADDI, J, BREAK) as the ISA expansion starting point.
+  - initial `MIPS32` support (NOP, ADDI, J, BREAK);
+  - initial `PowerPC32` support for real Cisco IOS bootstrap flows (branching, compare, load/store, SPR access).
+- Real-image bootstrap pipeline:
+  - binary image analyzer (`ELF32`, `RAW`, `GZIP`, `ZIP` detection);
+  - image loaders (`ELF32` segments and `RAW` bootstrap mapping);
+  - sparse memory bus for large address spaces and realistic image mapping.
 - Infrastructure adapters:
   - in-memory repositories;
   - `NativeRuntimeOrchestrator` as a temporary runtime integration adapter.
@@ -21,7 +26,7 @@
 
 - `src/FrameStack.Domain` - domain model and invariants.
 - `src/FrameStack.Application` - use-case layer and application ports.
-- `src/FrameStack.Emulation` - native simulation/execution core.
+- `src/FrameStack.Emulation` - native emulation/execution core.
 - `src/FrameStack.Infrastructure` - infrastructure adapters.
 - `src/FrameStack.Api` - REST API and composition root.
 - `tests/*` - unit and integration smoke tests.
@@ -33,6 +38,22 @@ dotnet restore
 dotnet test
 dotnet run --project src/FrameStack.Api
 ```
+
+## Image Probe CLI
+
+Run direct preflight analysis/execution on a local image:
+
+```bash
+dotnet run --project tools/FrameStack.ImageProbe -- /absolute/path/to/image.bin 200000 256 64 r3=0x1 r4=0x8000BD00
+```
+
+Arguments:
+
+- `image-path`
+- `instruction-budget` (optional, default `2048`)
+- `memory-mb` (optional, default `256`)
+- `timeline-steps` (optional, default `0`)
+- `register=value` overrides (optional, PowerPC only): `r0..r31`, `lr`, `ctr`, `cr`, `xer`, `pc`
 
 ## Main API
 

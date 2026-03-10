@@ -1,0 +1,95 @@
+using FrameStack.Emulation.Core;
+using FrameStack.Emulation.Images;
+using FrameStack.Emulation.Memory;
+using FrameStack.Emulation.Mips32;
+using FrameStack.Emulation.PowerPc32;
+
+namespace FrameStack.Emulation.Runtime;
+
+public sealed class RuntimeImageBootstrapper
+{
+    private readonly IImageAnalyzer _imageAnalyzer;
+    private readonly IReadOnlyList<IImageLoader> _imageLoaders;
+
+    public RuntimeImageBootstrapper(
+        IImageAnalyzer imageAnalyzer,
+        IEnumerable<IImageLoader> imageLoaders)
+    {
+        _imageAnalyzer = imageAnalyzer;
+        _imageLoaders = imageLoaders.ToArray();
+    }
+
+    public RuntimeSessionState Bootstrap(
+        string runtimeHandle,
+        byte[] imageBytes,
+        int memoryMb,
+        Action<FrameStack.Emulation.Abstractions.ICpuCore>? cpuInitializer = null)
+    {
+        if (memoryMb <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(memoryMb), "Memory must be greater than zero.");
+        }
+
+        var inspection = _imageAnalyzer.Analyze(imageBytes);
+        var loader = ResolveLoader(inspection);
+        var loadedImage = loader.Load(imageBytes, inspection, ImageLoadOptions.Default);
+
+        var memoryBus = new SparseMemoryBus((ulong)memoryMb * 1024UL * 1024UL);
+
+        foreach (var segment in loadedImage.Segments)
+        {
+            memoryBus.LoadBytes(segment.VirtualAddress, segment.Data);
+        }
+
+        var cpuCore = CreateCpuCore(loadedImage);
+        var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
+
+        cpuInitializer?.Invoke(cpuCore);
+
+        var report = new RuntimeBootstrapReport(
+            loadedImage.Format,
+            loadedImage.Architecture,
+            loadedImage.Endianness,
+            loadedImage.EntryPoint,
+            loadedImage.Segments.Count,
+            inspection.Summary);
+
+        return new RuntimeSessionState(runtimeHandle, machine, report);
+    }
+
+    private IImageLoader ResolveLoader(ImageInspectionResult inspection)
+    {
+        var loader = _imageLoaders.FirstOrDefault(candidate => candidate.CanLoad(inspection));
+
+        if (loader is not null)
+        {
+            return loader;
+        }
+
+        throw new NotSupportedException($"No loader registered for image format '{inspection.Format}'.");
+    }
+
+    private static FrameStack.Emulation.Abstractions.ICpuCore CreateCpuCore(LoadedImage loadedImage)
+    {
+        if (loadedImage.Architecture == ImageArchitecture.Mips32 &&
+            loadedImage.Endianness == ImageEndianness.BigEndian)
+        {
+            return new Mips32CpuCore();
+        }
+
+        if (loadedImage.Architecture == ImageArchitecture.Mips32 &&
+            loadedImage.Endianness == ImageEndianness.LittleEndian)
+        {
+            throw new NotSupportedException("Little-endian MIPS32 core is not implemented yet.");
+        }
+
+        if (loadedImage.Architecture == ImageArchitecture.PowerPc32 &&
+            loadedImage.Endianness == ImageEndianness.BigEndian)
+        {
+            return new PowerPc32CpuCore();
+        }
+
+        throw new NotSupportedException(
+            $"Unsupported architecture/endian pair: {loadedImage.Architecture}/{loadedImage.Endianness}.");
+    }
+}

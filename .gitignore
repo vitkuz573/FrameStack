@@ -25,3 +25,6 @@ artifacts/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local scratch
+.tmp/

@@ -4,4 +4,5 @@ public sealed record RuntimeStartRequest(
     Guid SessionId,
     string ArtifactPath,
     int CpuCores,
-    int MemoryMb);
+    int MemoryMb,
+    int PreflightInstructionBudget = 512);
