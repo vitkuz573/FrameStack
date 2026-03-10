@@ -1,0 +1,17 @@
+@FrameStack.Api_HostAddress = http://localhost:5166
+
+GET {{FrameStack.Api_HostAddress}}/health
+Accept: application/json
+
+###
+
+POST {{FrameStack.Api_HostAddress}}/api/v1/images
+Content-Type: application/json
+
+{
+  "vendor": "Cisco",
+  "platform": "Router",
+  "name": "IOS XE",
+  "version": "17.9.4a",
+  "artifactPath": "/var/lib/framestack/images/cisco-iosxe.bin"
+}

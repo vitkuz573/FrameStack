@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FrameStack.Api/FrameStack.Api.csproj" />
+    <Project Path="src/FrameStack.Application/FrameStack.Application.csproj" />
+    <Project Path="src/FrameStack.Domain/FrameStack.Domain.csproj" />
+    <Project Path="src/FrameStack.Emulation/FrameStack.Emulation.csproj" />
+    <Project Path="src/FrameStack.Infrastructure/FrameStack.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FrameStack.Api.IntegrationTests/FrameStack.Api.IntegrationTests.csproj" />
+    <Project Path="tests/FrameStack.Application.UnitTests/FrameStack.Application.UnitTests.csproj" />
+    <Project Path="tests/FrameStack.Domain.UnitTests/FrameStack.Domain.UnitTests.csproj" />
+    <Project Path="tests/FrameStack.Emulation.UnitTests/FrameStack.Emulation.UnitTests.csproj" />
+  </Folder>
+</Solution>
