@@ -2195,11 +2195,91 @@ static string DescribeInstruction(uint programCounter, uint instructionWord)
 
     return opcode switch
     {
+        14 => DescribeAddImmediate(instructionWord),
+        15 => DescribeAddImmediateShifted(instructionWord),
         16 => DescribeConditionalBranch(programCounter, instructionWord),
         18 => DescribeUnconditionalBranch(programCounter, instructionWord),
-        19 => $"op=0x13 xo=0x{((instructionWord >> 1) & 0x3FF):X3}",
+        19 => DescribeOpcode19(instructionWord),
+        24 => DescribeOrImmediate(instructionWord),
         31 => DescribeXForm(instructionWord),
+        32 => DescribeLoadWord(instructionWord),
+        34 => DescribeLoadByte(instructionWord),
+        36 => DescribeStoreWord(instructionWord),
+        38 => DescribeStoreByte(instructionWord),
         _ => $"op=0x{opcode:X2}",
+    };
+}
+
+static string DescribeAddImmediate(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = ExtractSignedImmediate(instructionWord);
+    return $"addi rt=r{rt} ra={DescribeBaseRegister(ra)} imm={immediate}";
+}
+
+static string DescribeAddImmediateShifted(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = ExtractSignedImmediate(instructionWord);
+    return $"addis rt=r{rt} ra={DescribeBaseRegister(ra)} imm={immediate}";
+}
+
+static string DescribeOrImmediate(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = instructionWord & 0xFFFF;
+    return $"ori ra=r{ra} rs=r{rs} imm=0x{immediate:X4}";
+}
+
+static string DescribeLoadWord(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lwz rt=r{rt} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeLoadByte(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lbz rt=r{rt} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeStoreWord(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"stw rs=r{rs} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeStoreByte(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"stb rs=r{rs} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeOpcode19(uint instructionWord)
+{
+    var xo = (int)((instructionWord >> 1) & 0x3FF);
+    var bo = (instructionWord >> 21) & 0x1F;
+    var bi = (instructionWord >> 16) & 0x1F;
+    var link = (instructionWord & 0x1) != 0;
+
+    return xo switch
+    {
+        16 => $"bclr bo={bo} bi={bi}{(link ? " lk" : string.Empty)}",
+        50 => "rfi",
+        150 => "isync",
+        528 => $"bcctr bo={bo} bi={bi}{(link ? " lk" : string.Empty)}",
+        _ => $"op=0x13 xo=0x{xo:X3}"
     };
 }
 
@@ -2228,6 +2308,23 @@ static int ExtractRt(uint instructionWord)
 static int ExtractRs(uint instructionWord)
 {
     return (int)((instructionWord >> 21) & 0x1F);
+}
+
+static int ExtractRa(uint instructionWord)
+{
+    return (int)((instructionWord >> 16) & 0x1F);
+}
+
+static int ExtractSignedImmediate(uint instructionWord)
+{
+    return unchecked((short)(instructionWord & 0xFFFF));
+}
+
+static string DescribeBaseRegister(int register)
+{
+    return register == 0
+        ? "0"
+        : $"r{register}";
 }
 
 static int DecodeSpr(uint instructionWord)
