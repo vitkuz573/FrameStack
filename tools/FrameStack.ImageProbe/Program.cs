@@ -1318,7 +1318,13 @@ static void PrintFirmwareGlobals(EmulationMachine machine)
         ("g_0x82F4077C", 0x82F4077C),
         ("g_0x82F40780", 0x82F40780),
         ("g_0x82F40784", 0x82F40784),
+        ("g_0x82F40788", 0x82F40788),
+        ("g_0x82F4078C", 0x82F4078C),
+        ("g_0x82F40790", 0x82F40790),
         ("g_0x82F40794", 0x82F40794),
+        ("g_0x82F40798", 0x82F40798),
+        ("g_0x82F4079C", 0x82F4079C),
+        ("g_0x82F407A0", 0x82F407A0),
     };
 
     Console.WriteLine("FirmwareGlobals:");
@@ -1345,7 +1351,13 @@ static void PrintDynamicWatch(
     var probeAddress77C = unchecked(r9 + 0x77Cu);
     var probeAddress780 = unchecked(r9 + 0x780u);
     var probeAddress784 = unchecked(r9 + 0x784u);
+    var probeAddress788 = unchecked(r9 + 0x788u);
+    var probeAddress78C = unchecked(r9 + 0x78Cu);
+    var probeAddress790 = unchecked(r9 + 0x790u);
     var probeAddress794 = unchecked(r9 + 0x794u);
+    var probeAddress798 = unchecked(r9 + 0x798u);
+    var probeAddress79C = unchecked(r9 + 0x79Cu);
+    var probeAddress7A0 = unchecked(r9 + 0x7A0u);
     var ioAddress77C = unchecked(r10 + 0x77Cu);
     var ioAddress780 = unchecked(r10 + 0x780u);
 
@@ -1357,7 +1369,13 @@ static void PrintDynamicWatch(
     Console.WriteLine($"  [r9+0x77C]=0x{machine.ReadUInt32(probeAddress77C):X8} @0x{probeAddress77C:X8}");
     Console.WriteLine($"  [r9+0x780]=0x{machine.ReadUInt32(probeAddress780):X8} @0x{probeAddress780:X8}");
     Console.WriteLine($"  [r9+0x784]=0x{machine.ReadUInt32(probeAddress784):X8} @0x{probeAddress784:X8}");
+    Console.WriteLine($"  [r9+0x788]=0x{machine.ReadUInt32(probeAddress788):X8} @0x{probeAddress788:X8}");
+    Console.WriteLine($"  [r9+0x78C]=0x{machine.ReadUInt32(probeAddress78C):X8} @0x{probeAddress78C:X8}");
+    Console.WriteLine($"  [r9+0x790]=0x{machine.ReadUInt32(probeAddress790):X8} @0x{probeAddress790:X8}");
     Console.WriteLine($"  [r9+0x794]=0x{machine.ReadUInt32(probeAddress794):X8} @0x{probeAddress794:X8}");
+    Console.WriteLine($"  [r9+0x798]=0x{machine.ReadUInt32(probeAddress798):X8} @0x{probeAddress798:X8}");
+    Console.WriteLine($"  [r9+0x79C]=0x{machine.ReadUInt32(probeAddress79C):X8} @0x{probeAddress79C:X8}");
+    Console.WriteLine($"  [r9+0x7A0]=0x{machine.ReadUInt32(probeAddress7A0):X8} @0x{probeAddress7A0:X8}");
     Console.WriteLine($"  [r10+0x77C]=0x{machine.ReadUInt32(ioAddress77C):X8} @0x{ioAddress77C:X8}");
     Console.WriteLine($"  [r10+0x780]=0x{machine.ReadUInt32(ioAddress780):X8} @0x{ioAddress780:X8}");
 }
