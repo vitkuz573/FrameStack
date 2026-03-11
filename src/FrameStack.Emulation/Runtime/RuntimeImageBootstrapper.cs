@@ -8,6 +8,9 @@ namespace FrameStack.Emulation.Runtime;
 
 public sealed class RuntimeImageBootstrapper
 {
+    private const uint CiscoC2600BootMode = 1;
+    private const uint CiscoC2600BootInfoPointer = 0x8000_BD00;
+
     private readonly IImageAnalyzer _imageAnalyzer;
     private readonly IReadOnlyList<IImageLoader> _imageLoaders;
 
@@ -44,7 +47,7 @@ public sealed class RuntimeImageBootstrapper
         var cpuCore = CreateCpuCore(loadedImage, inspection, memoryMb);
         var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
 
-        ApplyDefaultCpuInitialization(cpuCore, loadedImage, memoryMb);
+        ApplyDefaultCpuInitialization(cpuCore, loadedImage, inspection, memoryMb);
         cpuInitializer?.Invoke(cpuCore);
 
         var report = new RuntimeBootstrapReport(
@@ -121,6 +124,7 @@ public sealed class RuntimeImageBootstrapper
     private static void ApplyDefaultCpuInitialization(
         FrameStack.Emulation.Abstractions.ICpuCore cpuCore,
         LoadedImage loadedImage,
+        ImageInspectionResult inspection,
         int memoryMb)
     {
         if (loadedImage.Architecture != ImageArchitecture.PowerPc32 ||
@@ -131,6 +135,7 @@ public sealed class RuntimeImageBootstrapper
         }
 
         powerPcCore.Registers[1] = ResolvePowerPcInitialStackPointer(memoryMb);
+        ApplyCiscoPowerPcBootContext(powerPcCore, inspection);
     }
 
     private static uint ResolvePowerPcInitialStackPointer(int memoryMb)
@@ -141,5 +146,18 @@ public sealed class RuntimeImageBootstrapper
         return topOfRam > stackGuardBytes
             ? topOfRam - stackGuardBytes
             : stackGuardBytes;
+    }
+
+    private static void ApplyCiscoPowerPcBootContext(
+        PowerPc32CpuCore powerPcCore,
+        ImageInspectionResult inspection)
+    {
+        if (!string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        powerPcCore.Registers[3] = CiscoC2600BootMode;
+        powerPcCore.Registers[4] = CiscoC2600BootInfoPointer;
     }
 }

@@ -120,6 +120,42 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
+    public void BootstrapShouldInitializeCiscoC2600PowerPcBootRegisters()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-c2600-boot-context",
+            imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
+            memoryMb: 128);
+
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+
+        Assert.Equal(1u, powerPc.Registers[3]);
+        Assert.Equal(0x8000BD00u, powerPc.Registers[4]);
+    }
+
+    [Fact]
+    public void BootstrapShouldLeaveNonC2600PowerPcBootRegistersUntouched()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-nonc2600-boot-context",
+            imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2800"),
+            memoryMb: 128);
+
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+
+        Assert.Equal(0u, powerPc.Registers[3]);
+        Assert.Equal(0u, powerPc.Registers[4]);
+    }
+
+    [Fact]
     public void BootstrapShouldApplyCpuInitializerAfterReset()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
