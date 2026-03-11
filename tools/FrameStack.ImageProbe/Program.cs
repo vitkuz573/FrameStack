@@ -27,7 +27,7 @@ if (args.Length == 0)
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
         "[--watch32-reg <reg>:<offset>] [--watch32-ea <effective-address>] [--stop-on-watch32-change-reg <reg>:<offset>] [--stop-on-watch32-change-ea <effective-address>] [--global32 <name>=<address>] [--global32-ea <name>=<effective-address>] " +
         "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>] [--max-hotspots <count>] [--full-hotspots] " +
-        "[--progress-every <instructions>] [--report-json <path>] [--profile <name>]");
+        "[--progress-every <instructions>] [--report-json <path>] [--profile <name>] [--disable-null-pc-redirect]");
     return 1;
 }
 
@@ -202,6 +202,11 @@ if (cliOptions.ReportJsonPath is not null)
     Console.WriteLine($"ReportJson: {cliOptions.ReportJsonPath}");
 }
 
+if (cliOptions.DisableNullProgramCounterRedirect)
+{
+    Console.WriteLine("DisableNullPcRedirect: True");
+}
+
 if (TryMapVirtualAddressToFileOffset(inspection.Sections, inspection.EntryPoint, out var entryOffset))
 {
     Console.WriteLine($"EntryOffset: 0x{entryOffset:X8}");
@@ -283,6 +288,11 @@ try
 
     if (powerPcCore is not null)
     {
+        if (cliOptions.DisableNullProgramCounterRedirect)
+        {
+            powerPcCore.NullProgramCounterRedirectEnabled = false;
+        }
+
         if (cliOptions.SupervisorReturnOverrides.Count > 0 ||
             cliOptions.SupervisorReturnCallerOverrides.Count > 0 ||
             cliOptions.SupervisorReturnCallerHitOverrides.Count > 0)
@@ -395,6 +405,7 @@ try
     var runInstructionsPerSecond = runStopwatch.Elapsed.TotalSeconds > 0
         ? executedThisRun / runStopwatch.Elapsed.TotalSeconds
         : 0;
+    var nullProgramCounterRedirectCount = powerPcCore?.NullProgramCounterRedirectCount ?? 0;
     var supervisorCallCountersTotal = SnapshotSupervisorCallCounters(powerPcCore);
     var supervisorCallCountersDelta = ComputeCounterDelta(
         supervisorCallCountersBaseline,
@@ -441,6 +452,7 @@ try
 
     Console.WriteLine($"Halted: {state.Machine.Halted}");
     Console.WriteLine($"FinalProgramCounter: 0x{state.Machine.ProgramCounter:X8}");
+    Console.WriteLine($"NullProgramCounterRedirects: {nullProgramCounterRedirectCount}");
 
     if (traceRun.ProgramCounterTail.Count > 0)
     {
@@ -669,6 +681,7 @@ try
             trackedProgramCounterHits,
             namedGlobals,
             cliOptions.ProfileNames,
+            nullProgramCounterRedirectCount,
             supervisorCallCountersTotal,
             supervisorCallCountersDelta,
             supervisorTracer?.CallTrace ?? Array.Empty<PowerPcSupervisorCallTraceEntry>(),
@@ -743,6 +756,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var chunkBudget = DefaultChunkBudget;
     var maxHotSpots = DefaultMaxHotSpots;
     var progressEveryInstructions = 0L;
+    var disableNullProgramCounterRedirect = false;
     uint? stopAtProgramCounter = null;
     uint? stopOnSupervisorService = null;
     var stopAtProgramCounterHits = new Dictionary<uint, long>();
@@ -826,6 +840,9 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
             case "--profile":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 profileNames.Add(optionValue.Trim());
+                break;
+            case "--disable-null-pc-redirect":
+                disableNullProgramCounterRedirect = true;
                 break;
             case "--svc-return":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
@@ -946,6 +963,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         namedGlobalAddresses,
         namedGlobalEffectiveAddresses,
         profileNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray(),
+        disableNullProgramCounterRedirect,
         registerOverrideTokens.ToArray());
 }
 
@@ -1586,7 +1604,7 @@ static TracedRunResult RunBudgetWithTrace(
             if (tail is { Count: > 0 })
             {
                 errorDetails.AppendLine("ProgramCounterTailBeforeFailure:");
-                var start = Math.Max(0, tail.Count - Math.Min(tail.Count, 16));
+                var start = Math.Max(0, tail.Count - Math.Min(tail.Count, 64));
 
                 for (var index = start; index < tail.Count; index++)
                 {
@@ -3076,6 +3094,7 @@ static ProbeRunReport CreateProbeReport(
     IReadOnlyDictionary<uint, long> trackedProgramCounterHits,
     IReadOnlyDictionary<string, uint> namedGlobals,
     IReadOnlyList<string> profileNames,
+    long nullProgramCounterRedirectCount,
     IReadOnlyDictionary<uint, long> supervisorCallCountersTotal,
     IReadOnlyDictionary<uint, long> supervisorCallCountersDelta,
     IReadOnlyList<PowerPcSupervisorCallTraceEntry> supervisorCallTrace,
@@ -3161,6 +3180,7 @@ static ProbeRunReport CreateProbeReport(
         traceRun.StopReason == ExecutionStopReason.StopOnWatchWordChange,
         stopOnSupervisorServiceReached,
         profileNames.ToArray(),
+        nullProgramCounterRedirectCount,
         globalValues,
         trackedHits,
         hotSpots,
@@ -3214,6 +3234,7 @@ file sealed record ProbeCliOptions(
     IReadOnlyList<NamedAddress> NamedGlobalAddresses,
     IReadOnlyList<NamedAddress> NamedGlobalEffectiveAddresses,
     IReadOnlyList<string> ProfileNames,
+    bool DisableNullProgramCounterRedirect,
     string[] RegisterOverrideTokens);
 
 file sealed record TracedRunResult(
@@ -3256,6 +3277,7 @@ file sealed record ProbeRunReport(
     bool StopOnWatch32ChangeReached,
     bool StopOnSupervisorServiceReached,
     IReadOnlyList<string> Profiles,
+    long NullProgramCounterRedirectCount,
     IReadOnlyDictionary<string, string> Globals32,
     IReadOnlyDictionary<string, long> TrackedProgramCounterHits,
     IReadOnlyList<ProbeHotSpotReport> HotSpots,

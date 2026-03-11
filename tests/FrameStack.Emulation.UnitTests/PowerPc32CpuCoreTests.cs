@@ -47,6 +47,45 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void ExecuteCycleShouldNotRedirectFromNullProgramCounterWhenRedirectIsDisabled()
+    {
+        var cpu = new PowerPc32CpuCore(
+            new DefaultPowerPcSupervisorCallHandler(),
+            new StaticNullProgramCounterRedirectPolicy(0x1200))
+        {
+            NullProgramCounterRedirectEnabled = false
+        };
+
+        var memory = new ArrayMemoryBus(baseAddress: 0, sizeBytes: 0x3000);
+        cpu.Reset(0);
+
+        var exception = Assert.Throws<NotSupportedException>(() => cpu.ExecuteCycle(memory));
+
+        Assert.Contains("opcode 0x00", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, cpu.NullProgramCounterRedirectCount);
+    }
+
+    [Fact]
+    public void ExecuteCycleShouldTrackNullProgramCounterRedirectCount()
+    {
+        var cpu = new PowerPc32CpuCore(
+            new DefaultPowerPcSupervisorCallHandler(),
+            new StaticNullProgramCounterRedirectPolicy(0x1200));
+        var memory = new ArrayMemoryBus(baseAddress: 0, sizeBytes: 0x3000);
+        memory.WriteUInt32(0x1200, 0x6000_0000); // nop
+
+        cpu.Reset(0);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(1, cpu.NullProgramCounterRedirectCount);
+
+        cpu.Registers.Pc = 0;
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(2, cpu.NullProgramCounterRedirectCount);
+    }
+
+    [Fact]
     public void ExecuteCycleShouldThrowForNullProgramCounterWhenPolicyIsNotConfigured()
     {
         var cpu = new PowerPc32CpuCore();

@@ -45,6 +45,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private uint _machineStateRegister;
     private ulong _timeBaseCounter;
     private int _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
+    private long _nullProgramCounterRedirectCount;
 
     public PowerPc32CpuCore()
         : this(
@@ -73,6 +74,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
     public IReadOnlyDictionary<int, uint> ExtendedSpecialPurposeRegisters => _extendedSpr;
 
     public IReadOnlyDictionary<uint, long> SupervisorCallCounters => _supervisorCallCounters;
+
+    public long NullProgramCounterRedirectCount => _nullProgramCounterRedirectCount;
+
+    public bool NullProgramCounterRedirectEnabled { get; set; } = true;
 
     public IReadOnlyList<PowerPc32TlbEntryState> GetInstructionTlbEntries()
     {
@@ -582,6 +587,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private bool TryRedirectNullProgramCounter()
     {
+        if (!NullProgramCounterRedirectEnabled)
+        {
+            return false;
+        }
+
         if (_nullProgramCounterRedirectPolicy is null)
         {
             return false;
@@ -594,6 +604,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         _registers.Pc = redirectTarget;
+        _nullProgramCounterRedirectCount++;
         return true;
     }
 
