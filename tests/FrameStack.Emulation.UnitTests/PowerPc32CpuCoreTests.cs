@@ -393,21 +393,69 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
-    public void TlbieAndTlbiaShouldBehaveAsNoOps()
+    public void TlbieShouldInvalidateMatchingTlbEntry()
     {
         var cpu = new PowerPc32CpuCore();
-        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
 
-        memory.WriteUInt32(0x1000, 0x7C00_1A64); // tlbie r3
-        memory.WriteUInt32(0x1004, 0x7C00_02E4); // tlbia
+        memory.WriteUInt32(0x1000, 0x7D18_C3A6); // mtspr 792, r8 (MD_CTR, index field)
+        memory.WriteUInt32(0x1004, 0x7C9B_C3A6); // mtspr 795, r4 (MD_EPN)
+        memory.WriteUInt32(0x1008, 0x7CFD_C3A6); // mtspr 797, r7 (MD_TWC)
+        memory.WriteUInt32(0x100C, 0x7CDE_C3A6); // mtspr 798, r6 (MD_RPN installs DTLB entry)
+        memory.WriteUInt32(0x1010, 0x7C00_1A64); // tlbie r3
+        memory.WriteUInt32(0x1014, 0x80A3_0000); // lwz r5, 0(r3)
+
+        memory.WriteUInt32(0x0000_2000, 0xDEAD_BEEF);
+        memory.WriteUInt32(0x8000_0000, 0xAABB_CCDD);
 
         cpu.Reset(0x1000);
-        cpu.Registers[3] = 0x1234_5000;
+        cpu.WriteMachineStateRegister(0x0000_0010);
+        cpu.Registers[8] = 0; // Index 0
+        cpu.Registers[4] = 0x8000_0200; // EPN + valid
+        cpu.Registers[7] = 0x0000_0000;
+        cpu.Registers[6] = 0x0000_2000; // RPN
+        cpu.Registers[3] = 0x8000_0000; // Effective address mapped by entry above
 
-        cpu.ExecuteCycle(memory);
-        cpu.ExecuteCycle(memory);
+        for (var step = 0; step < 6; step++)
+        {
+            cpu.ExecuteCycle(memory);
+        }
 
-        Assert.Equal(0x1008u, cpu.ProgramCounter);
+        Assert.Equal(0xAABB_CCDDu, cpu.Registers[5]);
+        Assert.Equal(0x1018u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void TlbiaShouldInvalidateAllTlbEntries()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x1000, 0x7D18_C3A6); // mtspr 792, r8 (MD_CTR, index field)
+        memory.WriteUInt32(0x1004, 0x7C9B_C3A6); // mtspr 795, r4 (MD_EPN)
+        memory.WriteUInt32(0x1008, 0x7CFD_C3A6); // mtspr 797, r7 (MD_TWC)
+        memory.WriteUInt32(0x100C, 0x7CDE_C3A6); // mtspr 798, r6 (MD_RPN installs DTLB entry)
+        memory.WriteUInt32(0x1010, 0x7C00_02E4); // tlbia
+        memory.WriteUInt32(0x1014, 0x80A3_0000); // lwz r5, 0(r3)
+
+        memory.WriteUInt32(0x0000_2000, 0xDEAD_BEEF);
+        memory.WriteUInt32(0x8000_0000, 0xAABB_CCDD);
+
+        cpu.Reset(0x1000);
+        cpu.WriteMachineStateRegister(0x0000_0010);
+        cpu.Registers[8] = 0; // Index 0
+        cpu.Registers[4] = 0x8000_0200; // EPN + valid
+        cpu.Registers[7] = 0x0000_0000;
+        cpu.Registers[6] = 0x0000_2000; // RPN
+        cpu.Registers[3] = 0x8000_0000; // Effective address mapped by entry above
+
+        for (var step = 0; step < 6; step++)
+        {
+            cpu.ExecuteCycle(memory);
+        }
+
+        Assert.Equal(0xAABB_CCDDu, cpu.Registers[5]);
+        Assert.Equal(0x1018u, cpu.ProgramCounter);
     }
 
     [Fact]

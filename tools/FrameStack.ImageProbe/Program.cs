@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO.Compression;
+using System.Text;
 using FrameStack.Emulation.Core;
 using FrameStack.Emulation.Images;
 using FrameStack.Emulation.Memory;
@@ -468,6 +469,13 @@ catch (Exception exception)
     Console.WriteLine();
     Console.WriteLine("Preflight Run Failed:");
     Console.WriteLine(exception.Message);
+
+    if (exception.InnerException is not null)
+    {
+        Console.WriteLine("InnerException:");
+        Console.WriteLine(exception.InnerException.Message);
+    }
+
     return 3;
 }
 
@@ -854,13 +862,96 @@ static TracedRunResult RunBudgetWithTrace(
     while (remaining > 0 && !machine.Halted)
     {
         var currentChunk = (int)Math.Min(remaining, chunkBudget);
-        var traceSummary = machine.RunWithTrace(
-            currentChunk,
-            maxHotSpots: int.MaxValue,
-            tailLength: tailLength,
-            stopAtProgramCounter: stopAtProgramCounter,
-            watchWordAddresses: watchWordAddresses,
-            maxMemoryWatchEvents: DefaultMaxMemoryWatchEvents);
+        ExecutionTraceSummary traceSummary;
+
+        try
+        {
+            traceSummary = machine.RunWithTrace(
+                currentChunk,
+                maxHotSpots: int.MaxValue,
+                tailLength: tailLength,
+                stopAtProgramCounter: stopAtProgramCounter,
+                watchWordAddresses: watchWordAddresses,
+                maxMemoryWatchEvents: DefaultMaxMemoryWatchEvents);
+        }
+        catch (Exception exception)
+        {
+            var failurePc = machine.ProgramCounter;
+            var failureInstruction = machine.ReadUInt32(failurePc);
+            var errorDetails = new StringBuilder();
+            errorDetails.AppendLine("Trace chunk failed.");
+            errorDetails.AppendLine(
+                string.Format(CultureInfo.InvariantCulture, "ExecutedBeforeFailure: {0}", executed));
+            errorDetails.AppendLine(
+                string.Format(CultureInfo.InvariantCulture, "FailureProgramCounter: 0x{0:X8}", failurePc));
+            errorDetails.AppendLine(
+                string.Format(CultureInfo.InvariantCulture, "FailureInstruction: 0x{0:X8}", failureInstruction));
+            errorDetails.AppendLine("FailureWindow:");
+
+            for (var offset = -16; offset <= 16; offset += 4)
+            {
+                var address = unchecked((uint)((int)failurePc + offset));
+                var marker = offset == 0 ? "=>" : "  ";
+                errorDetails.AppendLine(
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "{0} 0x{1:X8}: 0x{2:X8}",
+                        marker,
+                        address,
+                        machine.ReadUInt32(address)));
+            }
+
+            if (tail is { Count: > 0 })
+            {
+                errorDetails.AppendLine("ProgramCounterTailBeforeFailure:");
+                var start = Math.Max(0, tail.Count - Math.Min(tail.Count, 16));
+
+                for (var index = start; index < tail.Count; index++)
+                {
+                    errorDetails.AppendLine(
+                        string.Format(CultureInfo.InvariantCulture, "  PC=0x{0:X8}", tail[index]));
+                }
+            }
+
+            if (memoryWatchEvents is { Count: > 0 })
+            {
+                errorDetails.AppendLine("MemoryWatchBeforeFailure:");
+                var start = Math.Max(0, memoryWatchEvents.Count - Math.Min(memoryWatchEvents.Count, 16));
+
+                for (var index = start; index < memoryWatchEvents.Count; index++)
+                {
+                    var watchEvent = memoryWatchEvents[index];
+                    errorDetails.AppendLine(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "  PC=0x{0:X8} ADDR=0x{1:X8} OLD=0x{2:X8} NEW=0x{3:X8}",
+                            watchEvent.ProgramCounter,
+                            watchEvent.Address,
+                            watchEvent.PreviousValue,
+                            watchEvent.CurrentValue));
+                }
+            }
+
+            if (watchWordAddresses.Count > 0)
+            {
+                errorDetails.AppendLine("WatchedWordValuesAtFailure:");
+                var count = Math.Min(watchWordAddresses.Count, 32);
+
+                for (var index = 0; index < count; index++)
+                {
+                    var address = watchWordAddresses[index];
+                    errorDetails.AppendLine(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "  0x{0:X8}=0x{1:X8}",
+                            address,
+                            machine.ReadUInt32(address)));
+                }
+            }
+
+            throw new InvalidOperationException(errorDetails.ToString(), exception);
+        }
+
         var chunkExecuted = traceSummary.Summary.ExecutedInstructions;
 
         executed += chunkExecuted;

@@ -167,7 +167,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         var pc = _registers.Pc;
-        var instructionWord = memoryBus.ReadUInt32(TranslateInstructionAddress(pc));
+        var instructionWord = memoryBus.ReadUInt32(pc);
         var instruction = new PowerPcInstruction(instructionWord);
 
         switch (instruction.Opcode)
@@ -791,7 +791,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers.Pc += 4;
                 break;
             case 306: // tlbie
-                InvalidateAllMpc8xxTlbEntries();
+                InvalidateMpc8xxTlbEntriesForEffectiveAddress(_registers[instruction.Rb]);
                 _registers.Pc += 4;
                 break;
             case 266: // add
@@ -1488,6 +1488,38 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         Array.Clear(_instructionTlb, 0, _instructionTlb.Length);
         Array.Clear(_dataTlb, 0, _dataTlb.Length);
+    }
+
+    private void InvalidateMpc8xxTlbEntriesForEffectiveAddress(uint effectiveAddress)
+    {
+        InvalidateMpc8xxTlbEntriesForEffectiveAddress(_instructionTlb, effectiveAddress);
+        InvalidateMpc8xxTlbEntriesForEffectiveAddress(_dataTlb, effectiveAddress);
+    }
+
+    private static void InvalidateMpc8xxTlbEntriesForEffectiveAddress(
+        Mpc8xxTlbEntry?[] tlb,
+        uint effectiveAddress)
+    {
+        for (var index = 0; index < tlb.Length; index++)
+        {
+            var entry = tlb[index];
+
+            if (!entry.HasValue ||
+                (entry.Value.EffectivePageNumber & Mpc8xxValidBit) == 0)
+            {
+                continue;
+            }
+
+            var pageSize = DecodeMpc8xxPageSize(entry.Value.RealPageNumber);
+            var pageBaseMask = ~(pageSize - 1);
+
+            if ((effectiveAddress & pageBaseMask) != (entry.Value.EffectivePageNumber & pageBaseMask))
+            {
+                continue;
+            }
+
+            tlb[index] = null;
+        }
     }
 
     private uint ReadDataUInt32(IMemoryBus memoryBus, uint effectiveAddress)
