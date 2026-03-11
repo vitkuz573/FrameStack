@@ -105,8 +105,33 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument2: 0,
             Argument3: 0));
 
-        Assert.Equal(3u, setResult.ReturnValue);
-        Assert.Equal(3u, readResult.ReturnValue);
+        Assert.Equal(103u, setResult.ReturnValue);
+        Assert.Equal(103u, readResult.ReturnValue);
+    }
+
+    [Fact]
+    public void HandleShouldKeepDefaultIoMemoryProfileWhenSetServiceReceivesZero()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler();
+
+        var setResult = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3B,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        var readResult = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3C,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        Assert.Equal(120u, setResult.ReturnValue);
+        Assert.Equal(120u, readResult.ReturnValue);
     }
 
     [Fact]
@@ -129,7 +154,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 0,
             TryWriteUInt32: writeWord));
 
-        Assert.Equal(0u, writes[0x1000]);
+        Assert.Equal(120u, writes[0x1000]);
         Assert.Equal(0u, writes[0x1004]);
         Assert.Equal(0x0000_8000u, writes[0x1008]);
     }
