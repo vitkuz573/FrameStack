@@ -1576,7 +1576,26 @@ static TracedRunResult RunBudgetWithTrace(
         }
         catch (Exception exception)
         {
-            var failurePc = machine.ProgramCounter;
+            if (exception is TraceChunkExecutionException traceChunkException)
+            {
+                var partialTrace = traceChunkException.PartialTraceSummary;
+                var partialExecuted = partialTrace.Summary.ExecutedInstructions;
+
+                if (partialExecuted > 0)
+                {
+                    executed += partialExecuted;
+                    remaining -= partialExecuted;
+                }
+
+                MergeHotSpots(hotSpotCounters, partialTrace.HotSpots);
+                MergeTrackedProgramCounterHits(trackedProgramCounterHits, partialTrace.TrackedProgramCounterHits);
+                MergeProgramCounterTail(tail, partialTrace.ProgramCounterTail, tailLength);
+                MergeMemoryWatchEvents(memoryWatchEvents, partialTrace.MemoryWatchEvents, DefaultMaxMemoryWatchEvents);
+            }
+
+            var failurePc = exception is TraceChunkExecutionException traceException
+                ? traceException.FailureProgramCounter
+                : machine.ProgramCounter;
             var failureInstruction = machine.ReadUInt32(failurePc);
             var errorDetails = new StringBuilder();
             errorDetails.AppendLine("Trace chunk failed.");

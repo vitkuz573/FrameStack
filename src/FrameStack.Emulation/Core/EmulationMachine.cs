@@ -186,7 +186,27 @@ public sealed class EmulationMachine
                 }
             }
 
-            _cpu.ExecuteCycle(_memoryBus);
+            try
+            {
+                _cpu.ExecuteCycle(_memoryBus);
+            }
+            catch (Exception exception)
+            {
+                throw new TraceChunkExecutionException(
+                    BuildTraceSummary(
+                        executedThisRun,
+                        hotSpotCounter,
+                        maxHotSpots,
+                        tailBuffer,
+                        tailCount,
+                        tailIndex,
+                        watchEvents,
+                        trackedProgramCounterHitCounter,
+                        ExecutionStopReason.None),
+                    pc,
+                    exception);
+            }
+
             executedThisRun++;
             ExecutedInstructions++;
 
@@ -240,47 +260,15 @@ public sealed class EmulationMachine
             }
         }
 
-        var summary = new ExecutionSummary(
+        return BuildTraceSummary(
             executedThisRun,
-            _cpu.Halted,
-            _cpu.ProgramCounter);
-
-        IReadOnlyList<ExecutionTraceEntry> hotSpots = Array.Empty<ExecutionTraceEntry>();
-
-        if (hotSpotCounter is { Count: > 0 } &&
-            maxHotSpots > 0)
-        {
-            hotSpots = hotSpotCounter
-                .OrderByDescending(pair => pair.Value)
-                .ThenBy(pair => pair.Key)
-                .Take(maxHotSpots)
-                .Select(pair => new ExecutionTraceEntry(pair.Key, pair.Value))
-                .ToArray();
-        }
-
-        IReadOnlyList<uint> programCounterTail = Array.Empty<uint>();
-
-        if (tailBuffer is not null && tailCount > 0)
-        {
-            var orderedTail = new uint[tailCount];
-            var start = tailCount == tailBuffer.Length
-                ? tailIndex
-                : 0;
-
-            for (var index = 0; index < tailCount; index++)
-            {
-                orderedTail[index] = tailBuffer[(start + index) % tailBuffer.Length];
-            }
-
-            programCounterTail = orderedTail;
-        }
-
-        return new ExecutionTraceSummary(
-            summary,
-            hotSpots,
-            programCounterTail,
+            hotSpotCounter,
+            maxHotSpots,
+            tailBuffer,
+            tailCount,
+            tailIndex,
             watchEvents,
-            trackedProgramCounterHitCounter ?? (IReadOnlyDictionary<uint, long>)new Dictionary<uint, long>(),
+            trackedProgramCounterHitCounter,
             stopReason);
     }
 
@@ -296,5 +284,80 @@ public sealed class EmulationMachine
     public uint ReadUInt32(uint address)
     {
         return _memoryBus.ReadUInt32(address);
+    }
+
+    private ExecutionTraceSummary BuildTraceSummary(
+        int executedThisRun,
+        Dictionary<uint, int>? hotSpotCounter,
+        int maxHotSpots,
+        uint[]? tailBuffer,
+        int tailCount,
+        int tailIndex,
+        List<MemoryWatchTraceEntry> watchEvents,
+        Dictionary<uint, long>? trackedProgramCounterHitCounter,
+        ExecutionStopReason stopReason)
+    {
+        var summary = new ExecutionSummary(
+            executedThisRun,
+            _cpu.Halted,
+            _cpu.ProgramCounter);
+
+        var hotSpots = BuildHotSpots(hotSpotCounter, maxHotSpots);
+        var programCounterTail = BuildProgramCounterTail(tailBuffer, tailCount, tailIndex);
+        var trackedProgramCounterHits = trackedProgramCounterHitCounter is null
+            ? (IReadOnlyDictionary<uint, long>)new Dictionary<uint, long>()
+            : trackedProgramCounterHitCounter.ToDictionary(pair => pair.Key, pair => pair.Value);
+        var memoryWatchEvents = watchEvents.Count == 0
+            ? Array.Empty<MemoryWatchTraceEntry>()
+            : watchEvents.ToArray();
+
+        return new ExecutionTraceSummary(
+            summary,
+            hotSpots,
+            programCounterTail,
+            memoryWatchEvents,
+            trackedProgramCounterHits,
+            stopReason);
+    }
+
+    private static ExecutionTraceEntry[] BuildHotSpots(
+        Dictionary<uint, int>? hotSpotCounter,
+        int maxHotSpots)
+    {
+        if (hotSpotCounter is not { Count: > 0 } ||
+            maxHotSpots <= 0)
+        {
+            return [];
+        }
+
+        return hotSpotCounter
+            .OrderByDescending(pair => pair.Value)
+            .ThenBy(pair => pair.Key)
+            .Take(maxHotSpots)
+            .Select(pair => new ExecutionTraceEntry(pair.Key, pair.Value))
+            .ToArray();
+    }
+
+    private static uint[] BuildProgramCounterTail(
+        uint[]? tailBuffer,
+        int tailCount,
+        int tailIndex)
+    {
+        if (tailBuffer is null || tailCount <= 0)
+        {
+            return [];
+        }
+
+        var orderedTail = new uint[tailCount];
+        var start = tailCount == tailBuffer.Length
+            ? tailIndex
+            : 0;
+
+        for (var index = 0; index < tailCount; index++)
+        {
+            orderedTail[index] = tailBuffer[(start + index) % tailBuffer.Length];
+        }
+
+        return orderedTail;
     }
 }

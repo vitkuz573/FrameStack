@@ -75,6 +75,28 @@ public sealed class EmulationMachineTraceTests
         Assert.Equal(1, summary.Summary.ExecutedInstructions);
     }
 
+    [Fact]
+    public void RunWithTraceShouldExposePartialTraceOnCpuFailure()
+    {
+        var machine = CreateMachine(new ThrowingTestCpu(throwOnCycle: 3));
+
+        var exception = Assert.Throws<TraceChunkExecutionException>(() => machine.RunWithTrace(
+            instructionBudget: 10,
+            maxHotSpots: 4,
+            tailLength: 8,
+            trackedProgramCounters: new HashSet<uint> { 0x1000u, 0x1004u }));
+
+        Assert.Equal(0x1000u, exception.FailureProgramCounter);
+        Assert.Equal(2, exception.PartialTraceSummary.Summary.ExecutedInstructions);
+        Assert.Equal(2, exception.PartialTraceSummary.TrackedProgramCounterHits[0x1000u]);
+        Assert.Equal(1, exception.PartialTraceSummary.TrackedProgramCounterHits[0x1004u]);
+        Assert.Equal([0x1000u, 0x1004u, 0x1000u], exception.PartialTraceSummary.ProgramCounterTail);
+        Assert.Contains(
+            exception.PartialTraceSummary.HotSpots,
+            entry => entry.ProgramCounter == 0x1000u && entry.Hits == 2);
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+    }
+
     private static EmulationMachine CreateMachine(ICpuCore cpu)
     {
         var memory = new ArrayMemoryBus(baseAddress: 0x0000, sizeBytes: 0x10000);
@@ -119,6 +141,37 @@ public sealed class EmulationMachineTraceTests
             {
                 Halted = true;
                 return;
+            }
+
+            ProgramCounter = ProgramCounter == 0x1000u
+                ? 0x1004u
+                : 0x1000u;
+        }
+    }
+
+    private sealed class ThrowingTestCpu(int throwOnCycle) : ICpuCore
+    {
+        private readonly int _throwOnCycle = throwOnCycle;
+        private int _executedCycles;
+
+        public uint ProgramCounter { get; private set; }
+
+        public bool Halted { get; private set; }
+
+        public void Reset(uint entryPoint)
+        {
+            ProgramCounter = entryPoint;
+            Halted = false;
+            _executedCycles = 0;
+        }
+
+        public void ExecuteCycle(IMemoryBus memoryBus)
+        {
+            _executedCycles++;
+
+            if (_executedCycles == _throwOnCycle)
+            {
+                throw new InvalidOperationException("synthetic cpu failure");
             }
 
             ProgramCounter = ProgramCounter == 0x1000u
