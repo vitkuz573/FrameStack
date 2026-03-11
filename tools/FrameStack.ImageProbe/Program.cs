@@ -14,7 +14,7 @@ const int DefaultTailLength = 64;
 const int DefaultMaxHotSpots = 4096;
 const int DefaultMaxMemoryWatchEvents = 1024;
 const long DefaultCheckpointAtInstructions = 2_200_000_000;
-const uint CheckpointMagic = 0x4653_5043; // "FSPC"
+const uint CheckpointMagic = 0x4653_504E; // "FSPN"
 const int CheckpointVersion = 1;
 const int CheckpointPageSize = 4096;
 
@@ -445,6 +445,7 @@ try
     {
         Console.WriteLine(
             $"FinalRegisters: R0=0x{powerPcCore.Registers[0]:X8} R1=0x{powerPcCore.Registers[1]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
+            $"R6=0x{powerPcCore.Registers[6]:X8} R7=0x{powerPcCore.Registers[7]:X8} " +
             $"R8=0x{powerPcCore.Registers[8]:X8} R9=0x{powerPcCore.Registers[9]:X8} R10=0x{powerPcCore.Registers[10]:X8} " +
             $"R27=0x{powerPcCore.Registers[27]:X8} R29=0x{powerPcCore.Registers[29]:X8} R30=0x{powerPcCore.Registers[30]:X8} " +
             $"R31=0x{powerPcCore.Registers[31]:X8} LR=0x{powerPcCore.Registers.Lr:X8} CTR=0x{powerPcCore.Registers.Ctr:X8} " +
@@ -1569,6 +1570,146 @@ static TracedRunResult RunBudgetWithTrace(
                 }
             }
 
+            if (powerPcCore is not null)
+            {
+                var registers = powerPcCore.Registers;
+                var instructionTlbEntries = powerPcCore.GetInstructionTlbEntries()
+                    .OrderBy(entry => entry.Index)
+                    .ToArray();
+                var dataTlbEntries = powerPcCore.GetDataTlbEntries()
+                    .OrderBy(entry => entry.Index)
+                    .ToArray();
+
+                errorDetails.AppendLine(
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "FailurePowerPcMsr: 0x{0:X8}",
+                        powerPcCore.MachineStateRegister));
+                errorDetails.AppendLine(
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "FailurePowerPcRegisters: R0=0x{0:X8} R1=0x{1:X8} R3=0x{2:X8} R4=0x{3:X8} R5=0x{4:X8} R6=0x{5:X8} R7=0x{6:X8} R8=0x{7:X8} R9=0x{8:X8} R10=0x{9:X8} R27=0x{10:X8} R29=0x{11:X8} R30=0x{12:X8} R31=0x{13:X8} LR=0x{14:X8} CTR=0x{15:X8} CR=0x{16:X8} XER=0x{17:X8}",
+                        registers[0],
+                        registers[1],
+                        registers[3],
+                        registers[4],
+                        registers[5],
+                        registers[6],
+                        registers[7],
+                        registers[8],
+                        registers[9],
+                        registers[10],
+                        registers[27],
+                        registers[29],
+                        registers[30],
+                        registers[31],
+                        registers.Lr,
+                        registers.Ctr,
+                        registers.Cr,
+                        registers.Xer));
+
+                var nonZeroSpr = powerPcCore.ExtendedSpecialPurposeRegisters
+                    .Where(entry => entry.Value != 0)
+                    .OrderBy(entry => entry.Key)
+                    .ToArray();
+
+                if (nonZeroSpr.Length > 0)
+                {
+                    errorDetails.AppendLine("FailurePowerPcSpr:");
+
+                    foreach (var (spr, value) in nonZeroSpr)
+                    {
+                        errorDetails.AppendLine(
+                            string.Format(
+                                CultureInfo.InvariantCulture,
+                                "  SPR[{0}]=0x{1:X8}",
+                                spr,
+                                value));
+                        }
+                }
+
+                if (instructionTlbEntries.Length > 0)
+                {
+                    errorDetails.AppendLine("FailureInstructionTlb:");
+
+                    foreach (var entry in instructionTlbEntries)
+                    {
+                        var pageSize = DecodeMpc8xxPageSizeForDebug(entry.TableWalkControl, entry.RealPageNumber);
+                        var hasMatch = TryTranslateViaMpc8xxTlbEntry(entry, failurePc, out var translatedAddress);
+                        var valid = (entry.EffectivePageNumber & 0x0000_0200) != 0;
+                        errorDetails.AppendLine(
+                            string.Format(
+                                CultureInfo.InvariantCulture,
+                                "  IDX={0:D2} EPN=0x{1:X8} RPN=0x{2:X8} TWC=0x{3:X8} PAGE=0x{4:X8} VALID={5} MATCH={6}{7}",
+                                entry.Index,
+                                entry.EffectivePageNumber,
+                                entry.RealPageNumber,
+                                entry.TableWalkControl,
+                                pageSize,
+                                valid ? 1 : 0,
+                                hasMatch ? 1 : 0,
+                                hasMatch
+                                    ? string.Format(CultureInfo.InvariantCulture, " TRANSLATED=0x{0:X8}", translatedAddress)
+                                    : string.Empty));
+                    }
+                }
+
+                if (dataTlbEntries.Length > 0)
+                {
+                    errorDetails.AppendLine("FailureDataTlb:");
+
+                    foreach (var entry in dataTlbEntries)
+                    {
+                        var pageSize = DecodeMpc8xxPageSizeForDebug(entry.TableWalkControl, entry.RealPageNumber);
+                        var hasMatch = TryTranslateViaMpc8xxTlbEntry(entry, powerPcCore.Registers[1], out var translatedAddress);
+                        var valid = (entry.EffectivePageNumber & 0x0000_0200) != 0;
+                        errorDetails.AppendLine(
+                            string.Format(
+                                CultureInfo.InvariantCulture,
+                                "  IDX={0:D2} EPN=0x{1:X8} RPN=0x{2:X8} TWC=0x{3:X8} PAGE=0x{4:X8} VALID={5} STACK_MATCH={6}{7}",
+                                entry.Index,
+                                entry.EffectivePageNumber,
+                                entry.RealPageNumber,
+                                entry.TableWalkControl,
+                                pageSize,
+                                valid ? 1 : 0,
+                                hasMatch ? 1 : 0,
+                                hasMatch
+                                    ? string.Format(CultureInfo.InvariantCulture, " STACK_TRANSLATED=0x{0:X8}", translatedAddress)
+                                    : string.Empty));
+                    }
+                }
+
+                errorDetails.AppendLine("FailureStackWords:");
+                var stackPointer = registers[1];
+
+                for (var offset = -16; offset <= 32; offset += 4)
+                {
+                    var effectiveAddress = unchecked((uint)((int)stackPointer + offset));
+                    var marker = offset == 0x14 ? "*" : " ";
+                    var directWord = machine.ReadUInt32(effectiveAddress);
+                    var translated = TryTranslateViaMpc8xxTlbEntries(dataTlbEntries, effectiveAddress, out var translatedAddress);
+                    var translatedWord = translated
+                        ? machine.ReadUInt32(translatedAddress)
+                        : 0u;
+
+                    errorDetails.AppendLine(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "{0} EA=0x{1:X8} DIRECT=0x{2:X8}{3}",
+                            marker,
+                            effectiveAddress,
+                            directWord,
+                            translated
+                                ? string.Format(
+                                    CultureInfo.InvariantCulture,
+                                    " PA=0x{0:X8} VALUE=0x{1:X8}",
+                                    translatedAddress,
+                                    translatedWord)
+                                : string.Empty));
+                }
+            }
+
             throw new InvalidOperationException(errorDetails.ToString(), exception);
         }
 
@@ -1758,6 +1899,7 @@ static void WriteCpuSnapshot(BinaryWriter writer, PowerPc32CpuSnapshot snapshot)
     writer.Write(snapshot.Halted);
     writer.Write(snapshot.MachineStateRegister);
     writer.Write(snapshot.TimeBaseCounter);
+    writer.Write(snapshot.LastMpc8xxControlSpr);
 
     writer.Write(snapshot.ExtendedSpecialPurposeRegisters.Count);
 
@@ -1774,6 +1916,9 @@ static void WriteCpuSnapshot(BinaryWriter writer, PowerPc32CpuSnapshot snapshot)
         writer.Write(serviceCode);
         writer.Write(hits);
     }
+
+    WriteTlbEntries(writer, snapshot.InstructionTlbEntries);
+    WriteTlbEntries(writer, snapshot.DataTlbEntries);
 }
 
 static PowerPc32CpuSnapshot ReadCpuSnapshot(BinaryReader reader)
@@ -1793,6 +1938,7 @@ static PowerPc32CpuSnapshot ReadCpuSnapshot(BinaryReader reader)
     var halted = reader.ReadBoolean();
     var msr = reader.ReadUInt32();
     var timeBase = reader.ReadUInt64();
+    var lastMpc8xxControlSpr = reader.ReadInt32();
 
     var extendedSprCount = reader.ReadInt32();
     var extendedSpr = new Dictionary<int, uint>(extendedSprCount);
@@ -1814,6 +1960,9 @@ static PowerPc32CpuSnapshot ReadCpuSnapshot(BinaryReader reader)
         supervisorCounters[serviceCode] = hits;
     }
 
+    var instructionTlbEntries = ReadTlbEntries(reader);
+    var dataTlbEntries = ReadTlbEntries(reader);
+
     return new PowerPc32CpuSnapshot(
         gpr,
         pc,
@@ -1824,8 +1973,50 @@ static PowerPc32CpuSnapshot ReadCpuSnapshot(BinaryReader reader)
         halted,
         msr,
         timeBase,
+        lastMpc8xxControlSpr,
         extendedSpr,
-        supervisorCounters);
+        supervisorCounters,
+        instructionTlbEntries,
+        dataTlbEntries);
+}
+
+static void WriteTlbEntries(
+    BinaryWriter writer,
+    IReadOnlyList<PowerPc32TlbEntryState> entries)
+{
+    writer.Write(entries.Count);
+
+    foreach (var entry in entries.OrderBy(item => item.Index))
+    {
+        writer.Write(entry.Index);
+        writer.Write(entry.EffectivePageNumber);
+        writer.Write(entry.RealPageNumber);
+        writer.Write(entry.TableWalkControl);
+    }
+}
+
+static IReadOnlyList<PowerPc32TlbEntryState> ReadTlbEntries(BinaryReader reader)
+{
+    var entryCount = reader.ReadInt32();
+
+    if (entryCount < 0)
+    {
+        throw new InvalidOperationException("Checkpoint TLB entry count is negative.");
+    }
+
+    var entries = new List<PowerPc32TlbEntryState>(entryCount);
+
+    for (var index = 0; index < entryCount; index++)
+    {
+        entries.Add(
+            new PowerPc32TlbEntryState(
+                reader.ReadInt32(),
+                reader.ReadUInt32(),
+                reader.ReadUInt32(),
+                reader.ReadUInt32()));
+    }
+
+    return entries;
 }
 
 static void WriteMemorySnapshot(BinaryWriter writer, IReadOnlyList<SparseMemoryPageSnapshot> pages)
@@ -2184,6 +2375,81 @@ static void PrintDynamicWatch(
         Console.WriteLine(
             $"  [{watchName}] BASE=0x{registerValue:X8} ADDR=0x{resolvedAddress:X8} VALUE=0x{machine.ReadUInt32(resolvedAddress):X8}");
     }
+}
+
+static uint DecodeMpc8xxPageSizeForDebug(uint tableWalkControl, uint realPageNumber)
+{
+    var pageSizeCode = tableWalkControl & 0x0000_000C;
+
+    if (pageSizeCode == 0x0000_000C)
+    {
+        return 8u * 1024u * 1024u;
+    }
+
+    if (pageSizeCode == 0x0000_0004)
+    {
+        return 512u * 1024u;
+    }
+
+    if (pageSizeCode == 0x0000_0000 &&
+        (realPageNumber & 0x0000_0008) != 0)
+    {
+        return 16u * 1024u;
+    }
+
+    return 4u * 1024u;
+}
+
+static bool TryTranslateViaMpc8xxTlbEntry(
+    PowerPc32TlbEntryState entry,
+    uint effectiveAddress,
+    out uint translatedAddress)
+{
+    translatedAddress = 0;
+
+    if ((entry.EffectivePageNumber & 0x0000_0200) == 0)
+    {
+        return false;
+    }
+
+    var pageSize = DecodeMpc8xxPageSizeForDebug(entry.TableWalkControl, entry.RealPageNumber);
+    var pageOffsetMask = pageSize - 1;
+    var pageBaseMask = ~pageOffsetMask;
+
+    if ((effectiveAddress & pageBaseMask) != (entry.EffectivePageNumber & pageBaseMask))
+    {
+        return false;
+    }
+
+    var translatedPageBase = entry.RealPageNumber & pageBaseMask;
+
+    if ((translatedPageBase & 0x8000_0000u) == 0 &&
+        (entry.EffectivePageNumber & 0x8000_0000u) != 0)
+    {
+        translatedPageBase |= 0x8000_0000u;
+    }
+
+    translatedAddress = translatedPageBase | (effectiveAddress & pageOffsetMask);
+    return true;
+}
+
+static bool TryTranslateViaMpc8xxTlbEntries(
+    IReadOnlyList<PowerPc32TlbEntryState> entries,
+    uint effectiveAddress,
+    out uint translatedAddress)
+{
+    for (var index = 0; index < entries.Count; index++)
+    {
+        if (!TryTranslateViaMpc8xxTlbEntry(entries[index], effectiveAddress, out translatedAddress))
+        {
+            continue;
+        }
+
+        return true;
+    }
+
+    translatedAddress = 0;
+    return false;
 }
 
 static void MergeHotSpots(

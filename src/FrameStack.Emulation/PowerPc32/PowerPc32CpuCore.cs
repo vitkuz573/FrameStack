@@ -18,7 +18,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private const uint Mpc8xxTableBaseMask = 0xFFFF_F000;
     private const uint Mpc8xxLevelOneIndexMask = 0x0000_0FFC;
-    private const uint Mpc8xxLevelTwoIndexMask = 0xFFFF_FE00;
+    private const uint Mpc8xxLevelTwoIndexMask = 0x0000_0FFC;
     private const uint Mpc8xxTlbIndexMask = 0x0000_1F00;
     private const uint Mpc8xxValidBit = 0x0000_0200;
     private const uint Mpc8xxPageSizeMask = 0x0000_000C;
@@ -65,6 +65,16 @@ public sealed class PowerPc32CpuCore : ICpuCore
     public IReadOnlyDictionary<int, uint> ExtendedSpecialPurposeRegisters => _extendedSpr;
 
     public IReadOnlyDictionary<uint, long> SupervisorCallCounters => _supervisorCallCounters;
+
+    public IReadOnlyList<PowerPc32TlbEntryState> GetInstructionTlbEntries()
+    {
+        return CaptureTlbEntries(_instructionTlb);
+    }
+
+    public IReadOnlyList<PowerPc32TlbEntryState> GetDataTlbEntries()
+    {
+        return CaptureTlbEntries(_dataTlb);
+    }
 
     public IPowerPcSupervisorCallHandler SupervisorCallHandler { get; set; }
 
@@ -113,8 +123,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
             Halted,
             _machineStateRegister,
             _timeBaseCounter,
+            _lastMpc8xxControlSpr,
             _extendedSpr.ToDictionary(entry => entry.Key, entry => entry.Value),
-            _supervisorCallCounters.ToDictionary(entry => entry.Key, entry => entry.Value));
+            _supervisorCallCounters.ToDictionary(entry => entry.Key, entry => entry.Value),
+            CaptureTlbEntries(_instructionTlb),
+            CaptureTlbEntries(_dataTlb));
     }
 
     public void RestoreSnapshot(PowerPc32CpuSnapshot snapshot)
@@ -148,17 +161,30 @@ public sealed class PowerPc32CpuCore : ICpuCore
         Array.Clear(_instructionTlb, 0, _instructionTlb.Length);
         Array.Clear(_dataTlb, 0, _dataTlb.Length);
 
-        if (_extendedSpr.TryGetValue(Mpc8xxInstructionRealPageNumberSpr, out var instructionRpn))
+        if (snapshot.InstructionTlbEntries.Count > 0 ||
+            snapshot.DataTlbEntries.Count > 0)
         {
-            InstallInstructionTlbEntry(instructionRpn);
+            RestoreTlbEntries(_instructionTlb, snapshot.InstructionTlbEntries);
+            RestoreTlbEntries(_dataTlb, snapshot.DataTlbEntries);
+        }
+        else
+        {
+            if (_extendedSpr.TryGetValue(Mpc8xxInstructionRealPageNumberSpr, out var instructionRpn))
+            {
+                InstallInstructionTlbEntry(instructionRpn);
+            }
+
+            if (_extendedSpr.TryGetValue(Mpc8xxDataRealPageNumberSpr, out var dataRpn))
+            {
+                InstallDataTlbEntry(dataRpn);
+            }
         }
 
-        if (_extendedSpr.TryGetValue(Mpc8xxDataRealPageNumberSpr, out var dataRpn))
+        if (snapshot.LastMpc8xxControlSpr is Mpc8xxDataControlSpr or Mpc8xxInstructionControlSpr)
         {
-            InstallDataTlbEntry(dataRpn);
+            _lastMpc8xxControlSpr = snapshot.LastMpc8xxControlSpr;
         }
-
-        if (_extendedSpr.ContainsKey(Mpc8xxDataControlSpr))
+        else if (_extendedSpr.ContainsKey(Mpc8xxDataControlSpr))
         {
             _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
         }
@@ -1492,6 +1518,13 @@ public sealed class PowerPc32CpuCore : ICpuCore
             }
 
             var translatedPageBase = entry.Value.RealPageNumber & pageBaseMask;
+
+            if ((translatedPageBase & 0x8000_0000u) == 0 &&
+                (entry.Value.EffectivePageNumber & 0x8000_0000u) != 0)
+            {
+                translatedPageBase |= 0x8000_0000u;
+            }
+
             var translatedOffset = effectiveAddress & pageOffsetMask;
             return translatedPageBase | translatedOffset;
         }
@@ -1710,6 +1743,49 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         return mask;
+    }
+
+    private static List<PowerPc32TlbEntryState> CaptureTlbEntries(Mpc8xxTlbEntry?[] tlb)
+    {
+        var entries = new List<PowerPc32TlbEntryState>(tlb.Length);
+
+        for (var index = 0; index < tlb.Length; index++)
+        {
+            var entry = tlb[index];
+
+            if (!entry.HasValue)
+            {
+                continue;
+            }
+
+            entries.Add(
+                new PowerPc32TlbEntryState(
+                    index,
+                    entry.Value.EffectivePageNumber,
+                    entry.Value.RealPageNumber,
+                    entry.Value.TableWalkControl));
+        }
+
+        return entries;
+    }
+
+    private static void RestoreTlbEntries(
+        Mpc8xxTlbEntry?[] destination,
+        IReadOnlyList<PowerPc32TlbEntryState> entries)
+    {
+        foreach (var entry in entries)
+        {
+            if (entry.Index < 0 || entry.Index >= destination.Length)
+            {
+                throw new InvalidOperationException(
+                    $"CPU snapshot has invalid TLB index {entry.Index}, expected range [0,{destination.Length - 1}].");
+            }
+
+            destination[entry.Index] = new Mpc8xxTlbEntry(
+                entry.EffectivePageNumber,
+                entry.RealPageNumber,
+                entry.TableWalkControl);
+        }
     }
 
     private readonly record struct Mpc8xxTlbEntry(

@@ -10,5 +10,8 @@ public sealed record PowerPc32CpuSnapshot(
     bool Halted,
     uint MachineStateRegister,
     ulong TimeBaseCounter,
+    int LastMpc8xxControlSpr,
     IReadOnlyDictionary<int, uint> ExtendedSpecialPurposeRegisters,
-    IReadOnlyDictionary<uint, long> SupervisorCallCounters);
+    IReadOnlyDictionary<uint, long> SupervisorCallCounters,
+    IReadOnlyList<PowerPc32TlbEntryState> InstructionTlbEntries,
+    IReadOnlyList<PowerPc32TlbEntryState> DataTlbEntries);
