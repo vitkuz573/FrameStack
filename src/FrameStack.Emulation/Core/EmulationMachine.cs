@@ -52,7 +52,11 @@ public sealed class EmulationMachine
             _cpu.ProgramCounter);
     }
 
-    public ExecutionTraceSummary RunWithTrace(int instructionBudget, int maxHotSpots = 10)
+    public ExecutionTraceSummary RunWithTrace(
+        int instructionBudget,
+        int maxHotSpots = 10,
+        int tailLength = 0,
+        uint? stopAtProgramCounter = null)
     {
         if (instructionBudget <= 0)
         {
@@ -64,14 +68,40 @@ public sealed class EmulationMachine
             throw new ArgumentOutOfRangeException(nameof(maxHotSpots), "Hot spot count must be greater than zero.");
         }
 
+        if (tailLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(tailLength), "Tail length cannot be negative.");
+        }
+
         var hitCounter = new Dictionary<uint, int>();
         var executedThisRun = 0;
+        var tailBuffer = tailLength > 0 ? new uint[tailLength] : null;
+        var tailIndex = 0;
+        var tailCount = 0;
 
         while (!_cpu.Halted && executedThisRun < instructionBudget)
         {
             var pc = _cpu.ProgramCounter;
+
+            if (stopAtProgramCounter.HasValue &&
+                pc == stopAtProgramCounter.Value)
+            {
+                break;
+            }
+
             hitCounter.TryGetValue(pc, out var hits);
             hitCounter[pc] = hits + 1;
+
+            if (tailBuffer is not null)
+            {
+                tailBuffer[tailIndex] = pc;
+                tailIndex = (tailIndex + 1) % tailBuffer.Length;
+
+                if (tailCount < tailBuffer.Length)
+                {
+                    tailCount++;
+                }
+            }
 
             _cpu.ExecuteCycle(_memoryBus);
             executedThisRun++;
@@ -90,7 +120,24 @@ public sealed class EmulationMachine
             .Select(pair => new ExecutionTraceEntry(pair.Key, pair.Value))
             .ToArray();
 
-        return new ExecutionTraceSummary(summary, hotSpots);
+        IReadOnlyList<uint> programCounterTail = Array.Empty<uint>();
+
+        if (tailBuffer is not null && tailCount > 0)
+        {
+            var orderedTail = new uint[tailCount];
+            var start = tailCount == tailBuffer.Length
+                ? tailIndex
+                : 0;
+
+            for (var index = 0; index < tailCount; index++)
+            {
+                orderedTail[index] = tailBuffer[(start + index) % tailBuffer.Length];
+            }
+
+            programCounterTail = orderedTail;
+        }
+
+        return new ExecutionTraceSummary(summary, hotSpots, programCounterTail);
     }
 
     public byte ReadByte(uint address)

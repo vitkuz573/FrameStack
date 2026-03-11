@@ -7,6 +7,7 @@ using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
 
 const int DefaultChunkBudget = 200_000_000;
+const int DefaultTailLength = 64;
 const long DefaultCheckpointAtInstructions = 2_200_000_000;
 const uint CheckpointMagic = 0x4653_5043; // "FSPC"
 const int CheckpointVersion = 1;
@@ -16,7 +17,9 @@ if (args.Length == 0)
 {
     Console.WriteLine(
         "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
-        "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>]");
+        "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
+        "[--svc-return <service>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--tail-length <count>] [--save-checkpoint <path>] " +
+        "[--window <address>:<before>:<after>]");
     return 1;
 }
 
@@ -53,9 +56,42 @@ if (registerOverrides.Count > 0)
         $"RegisterOverrides: {string.Join(", ", registerOverrides.Select(pair => $"{pair.Key}=0x{pair.Value:X8}"))}");
 }
 
+if (cliOptions.SupervisorReturnOverrides.Count > 0)
+{
+    Console.WriteLine(
+        $"SupervisorOverrides: {string.Join(", ", cliOptions.SupervisorReturnOverrides.OrderBy(pair => pair.Key).Select(pair => $"0x{pair.Key:X8}=0x{pair.Value:X8}"))}");
+}
+
+if (cliOptions.MemoryWriteOverrides.Count > 0)
+{
+    Console.WriteLine(
+        $"MemoryOverrides: {string.Join(", ", cliOptions.MemoryWriteOverrides.OrderBy(pair => pair.Key).Select(pair => $"0x{pair.Key:X8}=0x{pair.Value:X8}"))}");
+}
+
+if (cliOptions.StopAtProgramCounter.HasValue)
+{
+    Console.WriteLine($"StopAtProgramCounter: 0x{cliOptions.StopAtProgramCounter.Value:X8}");
+}
+
+if (cliOptions.TailLength != DefaultTailLength)
+{
+    Console.WriteLine($"TailLength: {cliOptions.TailLength}");
+}
+
+if (cliOptions.AdditionalInstructionWindows.Count > 0)
+{
+    Console.WriteLine(
+        $"AdditionalWindows: {string.Join(", ", cliOptions.AdditionalInstructionWindows.Select(window => $"0x{window.Address:X8}:{window.Before}:{window.After}"))}");
+}
+
 if (cliOptions.CheckpointFilePath is not null)
 {
     Console.WriteLine($"CheckpointFile: {cliOptions.CheckpointFilePath}");
+}
+
+if (cliOptions.SaveCheckpointFilePath is not null)
+{
+    Console.WriteLine($"SaveCheckpointFile: {cliOptions.SaveCheckpointFilePath}");
 }
 
 if (TryMapVirtualAddressToFileOffset(inspection.Sections, inspection.EntryPoint, out var entryOffset))
@@ -111,6 +147,7 @@ try
         }
     }
 
+    ApplyMemoryOverrides(state.Machine.MemoryBus, cliOptions.MemoryWriteOverrides);
     ApplyRegisterOverrides(state.CpuCore, registerOverrides);
 
     PowerPcTracingSupervisorCallHandler? supervisorTracer = null;
@@ -118,6 +155,13 @@ try
 
     if (powerPcCore is not null)
     {
+        if (cliOptions.SupervisorReturnOverrides.Count > 0)
+        {
+            powerPcCore.SupervisorCallHandler = new OverrideReturnPowerPcSupervisorCallHandler(
+                powerPcCore.SupervisorCallHandler,
+                cliOptions.SupervisorReturnOverrides);
+        }
+
         supervisorTracer = new PowerPcTracingSupervisorCallHandler(powerPcCore.SupervisorCallHandler);
         powerPcCore.SupervisorCallHandler = supervisorTracer;
     }
@@ -146,8 +190,10 @@ try
             if (powerPcCore is not null)
             {
                 Console.WriteLine(
-                    $"       R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
-                    $"R10=0x{powerPcCore.Registers[10]:X8} R27=0x{powerPcCore.Registers[27]:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
+                    $"       R0=0x{powerPcCore.Registers[0]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} " +
+                    $"R5=0x{powerPcCore.Registers[5]:X8} R9=0x{powerPcCore.Registers[9]:X8} R10=0x{powerPcCore.Registers[10]:X8} " +
+                    $"R11=0x{powerPcCore.Registers[11]:X8} R27=0x{powerPcCore.Registers[27]:X8} R30=0x{powerPcCore.Registers[30]:X8} " +
+                    $"R31=0x{powerPcCore.Registers[31]:X8} LR=0x{powerPcCore.Registers.Lr:X8} CTR=0x{powerPcCore.Registers.Ctr:X8}");
             }
 
             var stepSummary = state.Machine.Run(1);
@@ -168,13 +214,15 @@ try
 
     var remainingBudget = Math.Max(0L, instructionBudget - timelineExecuted);
     var hotSpotCounters = new Dictionary<uint, long>();
-    var tracedExecuted = RunBudgetWithTrace(
+    var traceRun = RunBudgetWithTrace(
         state.Machine,
         remainingBudget,
         cliOptions.ChunkBudget,
-        hotSpotCounters);
+        hotSpotCounters,
+        cliOptions.StopAtProgramCounter,
+        cliOptions.TailLength);
 
-    var executedThisRun = timelineExecuted + tracedExecuted;
+    var executedThisRun = timelineExecuted + traceRun.ExecutedInstructions;
     var executedFromBoot = baseExecutedInstructions + executedThisRun;
 
     Console.WriteLine();
@@ -184,24 +232,53 @@ try
     {
         Console.WriteLine($"ExecutedInstructionsFromBoot: {executedFromBoot}");
     }
+
+    if (cliOptions.StopAtProgramCounter.HasValue)
+    {
+        Console.WriteLine($"StopAtProgramCounterReached: {traceRun.StopPointReached}");
+    }
+
     Console.WriteLine($"Halted: {state.Machine.Halted}");
     Console.WriteLine($"FinalProgramCounter: 0x{state.Machine.ProgramCounter:X8}");
+
+    if (traceRun.ProgramCounterTail.Count > 0)
+    {
+        Console.WriteLine("ProgramCounterTail:");
+
+        foreach (var pc in traceRun.ProgramCounterTail)
+        {
+            var mapped = TryReadWordAtVirtualAddress(inspection.Sections, imageBytes, pc, out var instructionWordFromImage);
+            var instructionWord = mapped
+                ? instructionWordFromImage
+                : state.Machine.ReadUInt32(pc);
+            var source = mapped ? "img" : "mem";
+
+            Console.WriteLine(
+                $"  PC=0x{pc:X8} INSN=0x{instructionWord:X8} SRC={source} {DescribeInstruction(pc, instructionWord)}");
+        }
+    }
 
     if (powerPcCore is not null)
     {
         Console.WriteLine(
-            $"FinalRegisters: R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
+            $"FinalRegisters: R0=0x{powerPcCore.Registers[0]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
             $"R8=0x{powerPcCore.Registers[8]:X8} R9=0x{powerPcCore.Registers[9]:X8} R10=0x{powerPcCore.Registers[10]:X8} " +
-            $"R27=0x{powerPcCore.Registers[27]:X8} R29=0x{powerPcCore.Registers[29]:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
+            $"R27=0x{powerPcCore.Registers[27]:X8} R29=0x{powerPcCore.Registers[29]:X8} R30=0x{powerPcCore.Registers[30]:X8} " +
+            $"R31=0x{powerPcCore.Registers[31]:X8} LR=0x{powerPcCore.Registers.Lr:X8} CTR=0x{powerPcCore.Registers.Ctr:X8} " +
+            $"CR=0x{powerPcCore.Registers.Cr:X8} XER=0x{powerPcCore.Registers.Xer:X8} MSR=0x{powerPcCore.MachineStateRegister:X8}");
     }
 
     PrintFirmwareGlobals(state.Machine);
+    PrintDynamicWatch(state.Machine, powerPcCore);
     Console.WriteLine("HotSpots:");
 
-    foreach (var hotSpot in hotSpotCounters
-                 .OrderByDescending(entry => entry.Value)
-                 .ThenBy(entry => entry.Key)
-                 .Take(12))
+    var topHotSpots = hotSpotCounters
+        .OrderByDescending(entry => entry.Value)
+        .ThenBy(entry => entry.Key)
+        .Take(12)
+        .ToArray();
+
+    foreach (var hotSpot in topHotSpots)
     {
         var mapped = TryReadWordAtVirtualAddress(inspection.Sections, imageBytes, hotSpot.Key, out var instructionWordFromImage);
         var instructionWord = mapped
@@ -212,6 +289,68 @@ try
 
         Console.WriteLine(
             $"  PC=0x{hotSpot.Key:X8} Hits={hotSpot.Value} INSN=0x{instructionWord:X8} OPCODE=0x{majorOpcode:X2} SRC={source}");
+    }
+
+    Console.WriteLine("InstructionWindows:");
+    PrintInstructionWindow(
+        state.Machine,
+        inspection.Sections,
+        imageBytes,
+        state.Machine.ProgramCounter,
+        before: 5,
+        after: 5,
+        label: "FinalProgramCounter");
+
+    if (topHotSpots.Length > 0 && topHotSpots[0].Key != state.Machine.ProgramCounter)
+    {
+        PrintInstructionWindow(
+            state.Machine,
+            inspection.Sections,
+            imageBytes,
+            topHotSpots[0].Key,
+            before: 5,
+            after: 5,
+            label: "TopHotSpot");
+    }
+
+    if (cliOptions.AdditionalInstructionWindows.Count > 0)
+    {
+        foreach (var window in cliOptions.AdditionalInstructionWindows)
+        {
+            PrintInstructionWindow(
+                state.Machine,
+                inspection.Sections,
+                imageBytes,
+                window.Address,
+                window.Before,
+                window.After,
+                label: $"Window@0x{window.Address:X8}");
+        }
+    }
+
+    if (powerPcCore is not null)
+    {
+        var linkRegister = powerPcCore.Registers.Lr;
+        PrintInstructionWindow(
+            state.Machine,
+            inspection.Sections,
+            imageBytes,
+            linkRegister,
+            before: 16,
+            after: 8,
+            label: "LinkRegister");
+
+        if (linkRegister >= 4)
+        {
+            PrintInstructionWindow(
+                state.Machine,
+                inspection.Sections,
+                imageBytes,
+                linkRegister - 4,
+                before: 24,
+                after: 12,
+                label: "LinkReturnSite");
+        }
     }
 
     if (powerPcCore is not null &&
@@ -245,10 +384,36 @@ try
     }
 
     if (supervisorTracer is not null &&
+        supervisorTracer.CallTrace.Count > 0)
+    {
+        Console.WriteLine("SupervisorTrace:");
+
+        foreach (var entry in supervisorTracer.CallTrace.Take(40))
+        {
+            var nextPc = entry.NextProgramCounter.HasValue
+                ? $"0x{entry.NextProgramCounter.Value:X8}"
+                : "-";
+
+            Console.WriteLine(
+                $"  PC=0x{entry.ProgramCounter:X8} SVC=0x{entry.ServiceCode:X8} " +
+                $"A0=0x{entry.Argument0:X8} A1=0x{entry.Argument1:X8} " +
+                $"A2=0x{entry.Argument2:X8} A3=0x{entry.Argument3:X8} " +
+                $"RET=0x{entry.ReturnValue:X8} HALT={entry.Halt} NEXT={nextPc}");
+        }
+    }
+
+    if (supervisorTracer is not null &&
         supervisorTracer.ConsoleOutput.Length > 0)
     {
         Console.WriteLine("ConsoleOutput:");
         Console.WriteLine(supervisorTracer.ConsoleOutput);
+    }
+
+    if (cliOptions.SaveCheckpointFilePath is not null)
+    {
+        var finalCheckpoint = CreateCheckpoint(state, executedFromBoot, memoryMb);
+        SaveCheckpoint(cliOptions.SaveCheckpointFilePath, finalCheckpoint);
+        Console.WriteLine($"FinalCheckpointSaved: {cliOptions.SaveCheckpointFilePath}");
     }
 
     return 0;
@@ -295,9 +460,15 @@ static long ParseInstructionBudget(string[] input, int index, long fallback)
 static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
 {
     string? checkpointFilePath = null;
+    string? saveCheckpointFilePath = null;
     long? checkpointAtInstructions = null;
     var checkpointForceRebuild = false;
     var chunkBudget = DefaultChunkBudget;
+    uint? stopAtProgramCounter = null;
+    var tailLength = DefaultTailLength;
+    var supervisorReturnOverrides = new Dictionary<uint, uint>();
+    var memoryWriteOverrides = new Dictionary<uint, uint>();
+    var additionalInstructionWindows = new List<InstructionWindowRequest>();
     var registerOverrideTokens = new List<string>();
 
     for (var index = 0; index < tokens.Length; index++)
@@ -330,12 +501,38 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 checkpointAtInstructions = ParsePositiveLongOption(optionName, optionValue);
                 break;
+            case "--save-checkpoint":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                saveCheckpointFilePath = Path.GetFullPath(optionValue);
+                break;
             case "--checkpoint-force-rebuild":
                 checkpointForceRebuild = true;
                 break;
             case "--chunk-budget":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 chunkBudget = ParsePositiveIntOption(optionName, optionValue);
+                break;
+            case "--svc-return":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                var supervisorOverride = ParseSupervisorReturnOverride(optionValue);
+                supervisorReturnOverrides[supervisorOverride.ServiceCode] = supervisorOverride.ReturnValue;
+                break;
+            case "--poke32":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                var memoryOverride = ParseSupervisorReturnOverride(optionValue);
+                memoryWriteOverrides[memoryOverride.ServiceCode] = memoryOverride.ReturnValue;
+                break;
+            case "--stop-at-pc":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                stopAtProgramCounter = ParseUInt32Flexible(optionValue);
+                break;
+            case "--tail-length":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                tailLength = ParseNonNegativeIntOption(optionName, optionValue);
+                break;
+            case "--window":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                additionalInstructionWindows.Add(ParseInstructionWindowRequest(optionValue));
                 break;
             default:
                 throw new ArgumentException($"Unsupported option '{optionName}'.");
@@ -344,9 +541,15 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
 
     return new ProbeCliOptions(
         checkpointFilePath,
+        saveCheckpointFilePath,
         checkpointAtInstructions,
         checkpointForceRebuild,
         chunkBudget,
+        stopAtProgramCounter,
+        tailLength,
+        supervisorReturnOverrides,
+        memoryWriteOverrides,
+        additionalInstructionWindows,
         registerOverrideTokens.ToArray());
 }
 
@@ -381,6 +584,50 @@ static int ParsePositiveIntOption(string optionName, string value)
     }
 
     return parsed;
+}
+
+static int ParseNonNegativeIntOption(string optionName, string value)
+{
+    if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ||
+        parsed < 0)
+    {
+        throw new ArgumentException($"Option '{optionName}' requires a non-negative integer value.");
+    }
+
+    return parsed;
+}
+
+static (uint ServiceCode, uint ReturnValue) ParseSupervisorReturnOverride(string token)
+{
+    var separator = token.IndexOf('=');
+
+    if (separator <= 0 || separator == token.Length - 1)
+    {
+        throw new ArgumentException(
+            $"Invalid supervisor override '{token}'. Expected format '<service>=<value>'.");
+    }
+
+    var serviceCode = ParseUInt32Flexible(token[..separator]);
+    var returnValue = ParseUInt32Flexible(token[(separator + 1)..]);
+
+    return (serviceCode, returnValue);
+}
+
+static InstructionWindowRequest ParseInstructionWindowRequest(string token)
+{
+    var parts = token.Split(':', StringSplitOptions.TrimEntries);
+
+    if (parts.Length != 3)
+    {
+        throw new ArgumentException(
+            $"Invalid window specification '{token}'. Expected '<address>:<before>:<after>'.");
+    }
+
+    var address = ParseUInt32Flexible(parts[0]);
+    var before = ParseNonNegativeIntOption("--window", parts[1]);
+    var after = ParseNonNegativeIntOption("--window", parts[2]);
+
+    return new InstructionWindowRequest(address, before, after);
 }
 
 static Dictionary<string, uint> ParseRegisterOverrides(string[] tokens)
@@ -479,6 +726,16 @@ static void ApplyRegisterOverrides(
     }
 }
 
+static void ApplyMemoryOverrides(
+    FrameStack.Emulation.Abstractions.IMemoryBus memoryBus,
+    IReadOnlyDictionary<uint, uint> memoryWriteOverrides)
+{
+    foreach (var (address, value) in memoryWriteOverrides)
+    {
+        memoryBus.WriteUInt32(address, value);
+    }
+}
+
 static long RunBudgetWithoutTrace(
     EmulationMachine machine,
     long budget,
@@ -503,24 +760,42 @@ static long RunBudgetWithoutTrace(
     return executed;
 }
 
-static long RunBudgetWithTrace(
+static TracedRunResult RunBudgetWithTrace(
     EmulationMachine machine,
     long budget,
     int chunkBudget,
-    IDictionary<uint, long> hotSpotCounters)
+    IDictionary<uint, long> hotSpotCounters,
+    uint? stopAtProgramCounter,
+    int tailLength)
 {
     var executed = 0L;
     var remaining = Math.Max(0, budget);
+    var stopPointReached = false;
+    var tail = tailLength > 0
+        ? new List<uint>(tailLength)
+        : null;
 
     while (remaining > 0 && !machine.Halted)
     {
         var currentChunk = (int)Math.Min(remaining, chunkBudget);
-        var traceSummary = machine.RunWithTrace(currentChunk, maxHotSpots: int.MaxValue);
+        var traceSummary = machine.RunWithTrace(
+            currentChunk,
+            maxHotSpots: int.MaxValue,
+            tailLength: tailLength,
+            stopAtProgramCounter: stopAtProgramCounter);
         var chunkExecuted = traceSummary.Summary.ExecutedInstructions;
 
         executed += chunkExecuted;
         remaining -= chunkExecuted;
         MergeHotSpots(hotSpotCounters, traceSummary.HotSpots);
+        MergeProgramCounterTail(tail, traceSummary.ProgramCounterTail, tailLength);
+
+        if (stopAtProgramCounter.HasValue &&
+            machine.ProgramCounter == stopAtProgramCounter.Value)
+        {
+            stopPointReached = true;
+            break;
+        }
 
         if (chunkExecuted == 0)
         {
@@ -528,7 +803,10 @@ static long RunBudgetWithTrace(
         }
     }
 
-    return executed;
+    return new TracedRunResult(
+        executed,
+        tail?.ToArray() ?? Array.Empty<uint>(),
+        stopPointReached);
 }
 
 static ProbeCheckpoint CreateCheckpoint(
@@ -833,6 +1111,85 @@ static bool TryReadWordAtVirtualAddress(
     return true;
 }
 
+static void PrintInstructionWindow(
+    EmulationMachine machine,
+    IReadOnlyList<ImageSectionDescriptor> sections,
+    byte[] imageBytes,
+    uint centerAddress,
+    int before,
+    int after,
+    string label)
+{
+    Console.WriteLine($"  {label} center=0x{centerAddress:X8}:");
+
+    for (var offset = -before; offset <= after; offset++)
+    {
+        var address = unchecked((uint)((long)centerAddress + (offset * 4L)));
+        var mapped = TryReadWordAtVirtualAddress(sections, imageBytes, address, out var instructionFromImage);
+        var instruction = mapped
+            ? instructionFromImage
+            : machine.ReadUInt32(address);
+        var source = mapped ? "img" : "mem";
+        var marker = offset == 0 ? "=>" : "  ";
+        var description = DescribeInstruction(address, instruction);
+
+        Console.WriteLine($"  {marker} 0x{address:X8}: 0x{instruction:X8} [{source}] {description}");
+    }
+}
+
+static string DescribeInstruction(uint programCounter, uint instructionWord)
+{
+    var opcode = instructionWord >> 26;
+
+    return opcode switch
+    {
+        16 => DescribeConditionalBranch(programCounter, instructionWord),
+        18 => DescribeUnconditionalBranch(programCounter, instructionWord),
+        19 => $"op=0x13 xo=0x{((instructionWord >> 1) & 0x3FF):X3}",
+        31 => $"op=0x1F xo=0x{((instructionWord >> 1) & 0x3FF):X3}",
+        _ => $"op=0x{opcode:X2}",
+    };
+}
+
+static string DescribeUnconditionalBranch(uint programCounter, uint instructionWord)
+{
+    var displacement = (int)(instructionWord & 0x03FF_FFFC);
+
+    if ((displacement & 0x0200_0000) != 0)
+    {
+        displacement |= unchecked((int)0xFC00_0000);
+    }
+
+    var absolute = (instructionWord & 0x2) != 0;
+    var link = (instructionWord & 0x1) != 0;
+    var target = absolute
+        ? unchecked((uint)displacement)
+        : unchecked(programCounter + (uint)displacement);
+    var selfLoop = target == programCounter ? " self-loop" : string.Empty;
+
+    return $"b target=0x{target:X8} {(absolute ? "abs" : "rel")}{(link ? " lk" : string.Empty)}{selfLoop}";
+}
+
+static string DescribeConditionalBranch(uint programCounter, uint instructionWord)
+{
+    var bo = (instructionWord >> 21) & 0x1F;
+    var bi = (instructionWord >> 16) & 0x1F;
+    var displacement = (int)(instructionWord & 0x0000_FFFC);
+
+    if ((displacement & 0x0000_8000) != 0)
+    {
+        displacement |= unchecked((int)0xFFFF_0000);
+    }
+
+    var absolute = (instructionWord & 0x2) != 0;
+    var link = (instructionWord & 0x1) != 0;
+    var target = absolute
+        ? unchecked((uint)displacement)
+        : unchecked(programCounter + (uint)displacement);
+
+    return $"bc bo={bo} bi={bi} target=0x{target:X8} {(absolute ? "abs" : "rel")}{(link ? " lk" : string.Empty)}";
+}
+
 static void PrintFirmwareGlobals(EmulationMachine machine)
 {
     // Cisco ROM monitor global workspace in this image.
@@ -848,6 +1205,8 @@ static void PrintFirmwareGlobals(EmulationMachine machine)
         ("g_0x8000BD4C", 0x8000BD4C),
         ("g_0x8000BD50", 0x8000BD50),
         ("g_0x8000BD54", 0x8000BD54),
+        ("g_0x80090780", 0x80090780),
+        ("g_0x80090784", 0x80090784),
     };
 
     Console.WriteLine("FirmwareGlobals:");
@@ -856,6 +1215,39 @@ static void PrintFirmwareGlobals(EmulationMachine machine)
     {
         Console.WriteLine($"  {global.Name}=0x{machine.ReadUInt32(global.Address):X8}");
     }
+}
+
+static void PrintDynamicWatch(
+    EmulationMachine machine,
+    PowerPc32CpuCore? powerPcCore)
+{
+    if (powerPcCore is null)
+    {
+        return;
+    }
+
+    var r9 = powerPcCore.Registers[9];
+    var r10 = powerPcCore.Registers[10];
+    var probeAddress774 = unchecked(r9 + 0x774u);
+    var probeAddress778 = unchecked(r9 + 0x778u);
+    var probeAddress77C = unchecked(r9 + 0x77Cu);
+    var probeAddress780 = unchecked(r9 + 0x780u);
+    var probeAddress784 = unchecked(r9 + 0x784u);
+    var probeAddress794 = unchecked(r9 + 0x794u);
+    var ioAddress77C = unchecked(r10 + 0x77Cu);
+    var ioAddress780 = unchecked(r10 + 0x780u);
+
+    Console.WriteLine("DynamicWatch:");
+    Console.WriteLine($"  r9=0x{r9:X8}");
+    Console.WriteLine($"  r10=0x{r10:X8}");
+    Console.WriteLine($"  [r9+0x774]=0x{machine.ReadUInt32(probeAddress774):X8} @0x{probeAddress774:X8}");
+    Console.WriteLine($"  [r9+0x778]=0x{machine.ReadUInt32(probeAddress778):X8} @0x{probeAddress778:X8}");
+    Console.WriteLine($"  [r9+0x77C]=0x{machine.ReadUInt32(probeAddress77C):X8} @0x{probeAddress77C:X8}");
+    Console.WriteLine($"  [r9+0x780]=0x{machine.ReadUInt32(probeAddress780):X8} @0x{probeAddress780:X8}");
+    Console.WriteLine($"  [r9+0x784]=0x{machine.ReadUInt32(probeAddress784):X8} @0x{probeAddress784:X8}");
+    Console.WriteLine($"  [r9+0x794]=0x{machine.ReadUInt32(probeAddress794):X8} @0x{probeAddress794:X8}");
+    Console.WriteLine($"  [r10+0x77C]=0x{machine.ReadUInt32(ioAddress77C):X8} @0x{ioAddress77C:X8}");
+    Console.WriteLine($"  [r10+0x780]=0x{machine.ReadUInt32(ioAddress780):X8} @0x{ioAddress780:X8}");
 }
 
 static void MergeHotSpots(
@@ -869,12 +1261,73 @@ static void MergeHotSpots(
     }
 }
 
+static void MergeProgramCounterTail(
+    IList<uint>? destination,
+    IReadOnlyList<uint> source,
+    int maxLength)
+{
+    if (destination is null || maxLength <= 0 || source.Count == 0)
+    {
+        return;
+    }
+
+    foreach (var pc in source)
+    {
+        if (destination.Count == maxLength)
+        {
+            destination.RemoveAt(0);
+        }
+
+        destination.Add(pc);
+    }
+}
+
 file sealed record ProbeCliOptions(
     string? CheckpointFilePath,
+    string? SaveCheckpointFilePath,
     long? CheckpointAtInstructions,
     bool CheckpointForceRebuild,
     int ChunkBudget,
+    uint? StopAtProgramCounter,
+    int TailLength,
+    IReadOnlyDictionary<uint, uint> SupervisorReturnOverrides,
+    IReadOnlyDictionary<uint, uint> MemoryWriteOverrides,
+    IReadOnlyList<InstructionWindowRequest> AdditionalInstructionWindows,
     string[] RegisterOverrideTokens);
+
+file sealed record TracedRunResult(
+    long ExecutedInstructions,
+    IReadOnlyList<uint> ProgramCounterTail,
+    bool StopPointReached);
+
+file sealed record InstructionWindowRequest(
+    uint Address,
+    int Before,
+    int After);
+
+file sealed class OverrideReturnPowerPcSupervisorCallHandler : IPowerPcSupervisorCallHandler
+{
+    private readonly IPowerPcSupervisorCallHandler _inner;
+    private readonly IReadOnlyDictionary<uint, uint> _overrides;
+
+    public OverrideReturnPowerPcSupervisorCallHandler(
+        IPowerPcSupervisorCallHandler inner,
+        IReadOnlyDictionary<uint, uint> overrides)
+    {
+        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        _overrides = overrides ?? throw new ArgumentNullException(nameof(overrides));
+    }
+
+    public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
+    {
+        if (_overrides.TryGetValue(context.ServiceCode, out var returnValue))
+        {
+            return new PowerPcSupervisorCallResult(returnValue);
+        }
+
+        return _inner.Handle(context);
+    }
+}
 
 file sealed record ProbeCheckpoint(
     long ExecutedInstructionsFromBoot,

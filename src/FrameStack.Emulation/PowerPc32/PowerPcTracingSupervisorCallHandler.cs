@@ -6,11 +6,13 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
 {
     private const uint CiscoMonitorDispatcherService = 0x2B;
     private const uint PutCharacterService = 0x01;
+    private const int MaxTraceEntries = 256;
 
     private readonly IPowerPcSupervisorCallHandler _innerHandler;
     private readonly Dictionary<uint, long> _serviceCounters = new();
     private readonly Dictionary<PowerPcSupervisorSubcallKey, long> _subserviceCounters = new();
     private readonly StringBuilder _consoleOutput = new();
+    private readonly List<PowerPcSupervisorCallTraceEntry> _callTrace = new();
 
     public PowerPcTracingSupervisorCallHandler(IPowerPcSupervisorCallHandler innerHandler)
     {
@@ -21,6 +23,8 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
     public IReadOnlyDictionary<uint, long> ServiceCounters => _serviceCounters;
 
     public IReadOnlyDictionary<PowerPcSupervisorSubcallKey, long> SubserviceCounters => _subserviceCounters;
+
+    public IReadOnlyList<PowerPcSupervisorCallTraceEntry> CallTrace => _callTrace;
 
     public string ConsoleOutput => _consoleOutput.ToString();
 
@@ -42,7 +46,24 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
             AppendConsoleCharacter(unchecked((byte)context.Argument0));
         }
 
-        return _innerHandler.Handle(context);
+        var result = _innerHandler.Handle(context);
+
+        if (context.ServiceCode != PutCharacterService &&
+            _callTrace.Count < MaxTraceEntries)
+        {
+            _callTrace.Add(new PowerPcSupervisorCallTraceEntry(
+                context.ProgramCounter,
+                context.ServiceCode,
+                context.Argument0,
+                context.Argument1,
+                context.Argument2,
+                context.Argument3,
+                result.ReturnValue,
+                result.Halt,
+                result.NextProgramCounter));
+        }
+
+        return result;
     }
 
     private static void IncrementCounter<TKey>(IDictionary<TKey, long> dictionary, TKey key)

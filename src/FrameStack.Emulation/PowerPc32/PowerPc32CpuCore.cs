@@ -34,6 +34,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     public PowerPc32RegisterFile Registers => _registers;
 
+    public uint MachineStateRegister => _machineStateRegister;
+
     public IReadOnlyDictionary<uint, long> SupervisorCallCounters => _supervisorCallCounters;
 
     public IPowerPcSupervisorCallHandler SupervisorCallHandler { get; set; }
