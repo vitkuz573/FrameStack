@@ -1207,6 +1207,12 @@ static void PrintFirmwareGlobals(EmulationMachine machine)
         ("g_0x8000BD54", 0x8000BD54),
         ("g_0x80090780", 0x80090780),
         ("g_0x80090784", 0x80090784),
+        ("g_0x82F40774", 0x82F40774),
+        ("g_0x82F40778", 0x82F40778),
+        ("g_0x82F4077C", 0x82F4077C),
+        ("g_0x82F40780", 0x82F40780),
+        ("g_0x82F40784", 0x82F40784),
+        ("g_0x82F40794", 0x82F40794),
     };
 
     Console.WriteLine("FirmwareGlobals:");
