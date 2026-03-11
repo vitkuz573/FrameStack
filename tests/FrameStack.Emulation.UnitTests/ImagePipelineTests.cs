@@ -227,7 +227,7 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
-    public void BootstrapShouldReportAllocatedMemoryForPowerPcSupervisorService()
+    public void BootstrapShouldUseCiscoMemoryProfileForPowerPcSupervisorService()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
             new BinaryImageAnalyzer(),
@@ -242,7 +242,26 @@ public sealed class ImagePipelineTests
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
         Assert.Equal(2, summary.ExecutedInstructions);
-        Assert.Equal(256u * 1024u * 1024u, powerPc.Registers[3]);
+        Assert.Equal(128u * 1024u * 1024u, powerPc.Registers[3]);
+    }
+
+    [Fact]
+    public void BootstrapShouldNotOverReportPowerPcSupervisorMemoryWhenAllocationIsBelowCiscoProfile()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-ram-c2600-lower-bound",
+            imageBytes: CreateSparcTaggedPowerPcSupervisorProbeElf("C2600"),
+            memoryMb: 64);
+
+        var summary = state.Machine.Run(instructionBudget: 2);
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+
+        Assert.Equal(2, summary.ExecutedInstructions);
+        Assert.Equal(64u * 1024u * 1024u, powerPc.Registers[3]);
     }
 
     [Fact]

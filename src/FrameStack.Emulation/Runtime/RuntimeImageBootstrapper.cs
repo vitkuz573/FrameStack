@@ -8,6 +8,8 @@ namespace FrameStack.Emulation.Runtime;
 
 public sealed class RuntimeImageBootstrapper
 {
+    private const uint OneMbInBytes = 1024u * 1024u;
+    private const int CiscoC2600ReportedMemoryMaxMb = 128;
     private const uint CiscoC2600BootMode = 1;
     private const uint CiscoC2600BootInfoPointer = 0x8000_BD00;
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
@@ -94,7 +96,7 @@ public sealed class RuntimeImageBootstrapper
         if (loadedImage.Architecture == ImageArchitecture.PowerPc32 &&
             loadedImage.Endianness == ImageEndianness.BigEndian)
         {
-            var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb);
+            var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb, inspection);
             var nullProgramCounterRedirectPolicy =
                 ResolvePowerPcNullProgramCounterRedirectPolicy(loadedImage, inspection);
 
@@ -107,10 +109,32 @@ public sealed class RuntimeImageBootstrapper
             $"Unsupported architecture/endian pair: {loadedImage.Architecture}/{loadedImage.Endianness}.");
     }
 
-    private static uint ResolvePowerPcReportedMemoryBytes(int memoryMb)
+    private static uint ResolvePowerPcReportedMemoryBytes(
+        int memoryMb,
+        ImageInspectionResult inspection)
     {
-        const uint oneMb = 1024u * 1024u;
-        return checked((uint)memoryMb * oneMb);
+        var effectiveMemoryMb = memoryMb;
+
+        if (TryResolveCiscoPowerPcReportedMemoryProfileLimitMb(inspection.CiscoFamily, out var profileLimitMb))
+        {
+            effectiveMemoryMb = Math.Min(effectiveMemoryMb, profileLimitMb);
+        }
+
+        return checked((uint)effectiveMemoryMb * OneMbInBytes);
+    }
+
+    private static bool TryResolveCiscoPowerPcReportedMemoryProfileLimitMb(
+        string? ciscoFamily,
+        out int limitMb)
+    {
+        if (string.Equals(ciscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
+        {
+            limitMb = CiscoC2600ReportedMemoryMaxMb;
+            return true;
+        }
+
+        limitMb = 0;
+        return false;
     }
 
     private static CiscoPowerPcNullProgramCounterRedirectPolicy? ResolvePowerPcNullProgramCounterRedirectPolicy(
@@ -149,7 +173,7 @@ public sealed class RuntimeImageBootstrapper
         }
 
         const uint stackGuardBytes = 0x1000;
-        var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb);
+        var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb, inspection);
 
         return topOfRam > stackGuardBytes
             ? topOfRam - stackGuardBytes
