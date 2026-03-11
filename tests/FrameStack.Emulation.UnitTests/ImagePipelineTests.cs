@@ -133,6 +133,7 @@ public sealed class ImagePipelineTests
 
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
+        Assert.Equal(0x80006000u, powerPc.Registers[1]);
         Assert.Equal(1u, powerPc.Registers[3]);
         Assert.Equal(0x8000BD00u, powerPc.Registers[4]);
     }
@@ -151,6 +152,7 @@ public sealed class ImagePipelineTests
 
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
+        Assert.Equal(0x07FFF000u, powerPc.Registers[1]);
         Assert.Equal(0u, powerPc.Registers[3]);
         Assert.Equal(0u, powerPc.Registers[4]);
     }

@@ -10,6 +10,7 @@ public sealed class RuntimeImageBootstrapper
 {
     private const uint CiscoC2600BootMode = 1;
     private const uint CiscoC2600BootInfoPointer = 0x8000_BD00;
+    private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
 
     private readonly IImageAnalyzer _imageAnalyzer;
     private readonly IReadOnlyList<IImageLoader> _imageLoaders;
@@ -134,12 +135,19 @@ public sealed class RuntimeImageBootstrapper
             return;
         }
 
-        powerPcCore.Registers[1] = ResolvePowerPcInitialStackPointer(memoryMb);
+        powerPcCore.Registers[1] = ResolvePowerPcInitialStackPointer(memoryMb, inspection);
         ApplyCiscoPowerPcBootContext(powerPcCore, inspection);
     }
 
-    private static uint ResolvePowerPcInitialStackPointer(int memoryMb)
+    private static uint ResolvePowerPcInitialStackPointer(
+        int memoryMb,
+        ImageInspectionResult inspection)
     {
+        if (string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
+        {
+            return CiscoC2600InitialStackPointer;
+        }
+
         const uint stackGuardBytes = 0x1000;
         var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb);
 
