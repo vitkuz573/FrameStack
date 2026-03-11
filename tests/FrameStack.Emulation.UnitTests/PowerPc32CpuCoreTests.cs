@@ -6,6 +6,29 @@ namespace FrameStack.Emulation.UnitTests;
 public sealed class PowerPc32CpuCoreTests
 {
     [Fact]
+    public void SetHaltedShouldAllowResumingExecution()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x6063_0001); // ori r3, r3, 1
+
+        cpu.Reset(0x1000);
+        cpu.SetHalted(true);
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1000u, cpu.ProgramCounter);
+        Assert.Equal(0u, cpu.Registers[3]);
+
+        cpu.SetHalted(false);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+        Assert.Equal(1u, cpu.Registers[3]);
+    }
+
+    [Fact]
     public void BlrlShouldBranchToPreviousLrValueAndUpdateLinkRegister()
     {
         var cpu = new PowerPc32CpuCore();

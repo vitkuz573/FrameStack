@@ -89,6 +89,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
         Halted = false;
     }
 
+    public void SetHalted(bool halted)
+    {
+        Halted = halted;
+    }
+
     public PowerPc32CpuSnapshot CreateSnapshot()
     {
         var gpr = new uint[32];

@@ -22,7 +22,7 @@ if (args.Length == 0)
 {
     Console.WriteLine(
         "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
-        "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
+        "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--resume-halted] [--chunk-budget <instructions>] " +
         "[--svc-return <service>=<value>] [--svc-return-caller <service>@<caller>=<value>] [--svc-return-caller-hit <service>@<caller>#<hit>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
         "[--watch32-reg <reg>:<offset>] [--stop-on-watch32-change-reg <reg>:<offset>] [--global32 <name>=<address>] " +
@@ -169,6 +169,11 @@ if (cliOptions.CheckpointFilePath is not null)
     Console.WriteLine($"CheckpointFile: {cliOptions.CheckpointFilePath}");
 }
 
+if (cliOptions.ResumeHalted)
+{
+    Console.WriteLine("ResumeHalted: True");
+}
+
 if (cliOptions.SaveCheckpointFilePath is not null)
 {
     Console.WriteLine($"SaveCheckpointFile: {cliOptions.SaveCheckpointFilePath}");
@@ -213,6 +218,14 @@ try
             Console.WriteLine(
                 $"Checkpoint: loaded {cliOptions.CheckpointFilePath} " +
                 $"(base instructions: {baseExecutedInstructions}).");
+
+            if (cliOptions.ResumeHalted &&
+                state.CpuCore is PowerPc32CpuCore resumedPowerPcCore &&
+                resumedPowerPcCore.Halted)
+            {
+                resumedPowerPcCore.SetHalted(false);
+                Console.WriteLine("Checkpoint: resumed halted CPU state (--resume-halted).");
+            }
         }
         else
         {
@@ -696,6 +709,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     string? reportJsonPath = null;
     long? checkpointAtInstructions = null;
     var checkpointForceRebuild = false;
+    var resumeHalted = false;
     var chunkBudget = DefaultChunkBudget;
     var maxHotSpots = DefaultMaxHotSpots;
     var progressEveryInstructions = 0L;
@@ -753,6 +767,9 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 break;
             case "--checkpoint-force-rebuild":
                 checkpointForceRebuild = true;
+                break;
+            case "--resume-halted":
+                resumeHalted = true;
                 break;
             case "--chunk-budget":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
@@ -861,6 +878,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         reportJsonPath,
         checkpointAtInstructions,
         checkpointForceRebuild,
+        resumeHalted,
         chunkBudget,
         maxHotSpots,
         progressEveryInstructions,
@@ -1978,9 +1996,73 @@ static string DescribeInstruction(uint programCounter, uint instructionWord)
         16 => DescribeConditionalBranch(programCounter, instructionWord),
         18 => DescribeUnconditionalBranch(programCounter, instructionWord),
         19 => $"op=0x13 xo=0x{((instructionWord >> 1) & 0x3FF):X3}",
-        31 => $"op=0x1F xo=0x{((instructionWord >> 1) & 0x3FF):X3}",
+        31 => DescribeXForm(instructionWord),
         _ => $"op=0x{opcode:X2}",
     };
+}
+
+static string DescribeXForm(uint instructionWord)
+{
+    var xo = (int)((instructionWord >> 1) & 0x3FF);
+
+    return xo switch
+    {
+        19 => $"mfcr rt=r{ExtractRt(instructionWord)}",
+        83 => $"mfmsr rt=r{ExtractRt(instructionWord)}",
+        144 => $"mtcrf mask=0x{((instructionWord >> 12) & 0xFF):X2} rs=r{ExtractRs(instructionWord)}",
+        146 => $"mtmsr rs=r{ExtractRs(instructionWord)}",
+        339 => $"mfspr rt=r{ExtractRt(instructionWord)} spr={DescribeSpr(DecodeSpr(instructionWord))}",
+        371 => $"mftb rt=r{ExtractRt(instructionWord)} spr={DescribeSpr(DecodeSpr(instructionWord))}",
+        467 => $"mtspr spr={DescribeSpr(DecodeSpr(instructionWord))} rs=r{ExtractRs(instructionWord)}",
+        _ => $"op=0x1F xo=0x{xo:X3}",
+    };
+}
+
+static int ExtractRt(uint instructionWord)
+{
+    return (int)((instructionWord >> 21) & 0x1F);
+}
+
+static int ExtractRs(uint instructionWord)
+{
+    return (int)((instructionWord >> 21) & 0x1F);
+}
+
+static int DecodeSpr(uint instructionWord)
+{
+    var sprHighBits = (int)((instructionWord >> 16) & 0x1F);
+    var sprLowBits = (int)((instructionWord >> 11) & 0x1F);
+    return (sprLowBits << 5) | sprHighBits;
+}
+
+static string DescribeSpr(int spr)
+{
+    var name = spr switch
+    {
+        8 => "LR",
+        9 => "CTR",
+        18 => "DSISR",
+        19 => "DAR",
+        22 => "DEC",
+        26 => "SRR0",
+        27 => "SRR1",
+        268 => "TBL",
+        269 => "TBU",
+        784 => "MI_CTR",
+        787 => "MI_EPN",
+        789 => "MI_TWC",
+        790 => "MI_RPN",
+        792 => "MD_CTR",
+        795 => "MD_EPN",
+        796 => "M_TWB",
+        797 => "MD_TWC",
+        798 => "MD_RPN",
+        _ => null
+    };
+
+    return name is null
+        ? spr.ToString(CultureInfo.InvariantCulture)
+        : $"{spr}({name})";
 }
 
 static string DescribeUnconditionalBranch(uint programCounter, uint instructionWord)
@@ -2294,6 +2376,7 @@ file sealed record ProbeCliOptions(
     string? ReportJsonPath,
     long? CheckpointAtInstructions,
     bool CheckpointForceRebuild,
+    bool ResumeHalted,
     int ChunkBudget,
     int MaxHotSpots,
     long ProgressEveryInstructions,
