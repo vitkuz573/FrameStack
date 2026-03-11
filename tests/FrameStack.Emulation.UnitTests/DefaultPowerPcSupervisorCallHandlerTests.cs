@@ -131,6 +131,6 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
 
         Assert.Equal(0u, writes[0x1000]);
         Assert.Equal(0u, writes[0x1004]);
-        Assert.Equal(0u, writes[0x1008]);
+        Assert.Equal(0x0000_8000u, writes[0x1008]);
     }
 }

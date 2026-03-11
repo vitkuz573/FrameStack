@@ -12,6 +12,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private const uint DefaultReportedMemoryBytes = 64u * 1024u * 1024u;
     private const uint MaxIoMemoryProfileValue = 125;
     private const uint IoMemoryProfileOffsetEncodingBase = 100;
+    private const uint IoMemoryDescriptorTimingClassWord = 0x0000_8000;
 
     private readonly uint _reportedMemoryBytes;
     private uint _ioMemoryProfile;
@@ -65,7 +66,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         // Keeping the leading words deterministic avoids random stale-state reads.
         context.TryWriteDataUInt32(context.Argument0, _ioMemoryProfile);
         context.TryWriteDataUInt32(context.Argument0 + 4, 0);
-        context.TryWriteDataUInt32(context.Argument0 + 8, 0);
+        context.TryWriteDataUInt32(context.Argument0 + 8, IoMemoryDescriptorTimingClassWord);
     }
 
     private static uint NormalizeIoMemoryProfile(uint rawValue)

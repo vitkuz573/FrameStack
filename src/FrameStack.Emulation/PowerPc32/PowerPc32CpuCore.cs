@@ -235,6 +235,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
             TryRedirectNullProgramCounter();
         }
 
+        // PowerPC time-base advances independently from mftb reads.
+        _timeBaseCounter++;
+
         pc = _registers.Pc;
         var instructionWord = memoryBus.ReadUInt32(TranslateInstructionAddress(pc));
         var instruction = new PowerPcInstruction(instructionWord);
@@ -1347,8 +1350,6 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void ExecuteMoveFromTimeBase(PowerPcInstruction instruction)
     {
-        _timeBaseCounter++;
-
         var value = instruction.Spr switch
         {
             268 => unchecked((uint)_timeBaseCounter),          // TBL

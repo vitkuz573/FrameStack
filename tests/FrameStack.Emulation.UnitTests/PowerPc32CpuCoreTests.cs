@@ -457,6 +457,25 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void TimeBaseShouldAdvanceOnEveryExecutedInstruction()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x6000_0000); // nop (ori r0, r0, 0)
+        memory.WriteUInt32(0x1004, 0x6000_0000); // nop
+        memory.WriteUInt32(0x1008, 0x7C8C_42E6); // mftb r4, 0x10c (TBL)
+
+        cpu.Reset(0x1000);
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(3u, cpu.Registers[4]);
+        Assert.Equal(0x100Cu, cpu.ProgramCounter);
+    }
+
+    [Fact]
     public void DivwuShouldDivideUnsignedWords()
     {
         var cpu = new PowerPc32CpuCore();
