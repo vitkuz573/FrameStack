@@ -103,6 +103,23 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
+    public void BootstrapShouldInitializePowerPcStackPointerFromAllocatedMemory()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-stack-init",
+            imageBytes: CreateSparcTaggedPowerPcElf(),
+            memoryMb: 192);
+
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+
+        Assert.Equal(0x0BFFF000u, powerPc.Registers[1]);
+    }
+
+    [Fact]
     public void BootstrapShouldApplyCpuInitializerAfterReset()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
@@ -120,6 +137,28 @@ public sealed class ImagePipelineTests
             });
 
         Assert.Equal(0x80008004u, state.Machine.ProgramCounter);
+    }
+
+    [Fact]
+    public void BootstrapShouldAllowCpuInitializerToOverridePowerPcStackPointer()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-stack-override",
+            imageBytes: CreateSparcTaggedPowerPcElf(),
+            memoryMb: 192,
+            cpuInitializer: cpu =>
+            {
+                var powerPc = Assert.IsType<PowerPc32CpuCore>(cpu);
+                powerPc.Registers[1] = 0x12345000;
+            });
+
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+
+        Assert.Equal(0x12345000u, powerPc.Registers[1]);
     }
 
     [Fact]

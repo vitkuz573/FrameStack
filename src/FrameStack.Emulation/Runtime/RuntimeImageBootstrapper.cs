@@ -44,6 +44,7 @@ public sealed class RuntimeImageBootstrapper
         var cpuCore = CreateCpuCore(loadedImage, memoryMb);
         var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
 
+        ApplyDefaultCpuInitialization(cpuCore, loadedImage, memoryMb);
         cpuInitializer?.Invoke(cpuCore);
 
         var report = new RuntimeBootstrapReport(
@@ -100,5 +101,30 @@ public sealed class RuntimeImageBootstrapper
     {
         const uint oneMb = 1024u * 1024u;
         return checked((uint)memoryMb * oneMb);
+    }
+
+    private static void ApplyDefaultCpuInitialization(
+        FrameStack.Emulation.Abstractions.ICpuCore cpuCore,
+        LoadedImage loadedImage,
+        int memoryMb)
+    {
+        if (loadedImage.Architecture != ImageArchitecture.PowerPc32 ||
+            loadedImage.Endianness != ImageEndianness.BigEndian ||
+            cpuCore is not PowerPc32CpuCore powerPcCore)
+        {
+            return;
+        }
+
+        powerPcCore.Registers[1] = ResolvePowerPcInitialStackPointer(memoryMb);
+    }
+
+    private static uint ResolvePowerPcInitialStackPointer(int memoryMb)
+    {
+        const uint stackGuardBytes = 0x1000;
+        var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb);
+
+        return topOfRam > stackGuardBytes
+            ? topOfRam - stackGuardBytes
+            : stackGuardBytes;
     }
 }
