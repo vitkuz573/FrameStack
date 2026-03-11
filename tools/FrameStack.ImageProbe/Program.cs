@@ -23,7 +23,7 @@ if (args.Length == 0)
     Console.WriteLine(
         "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
         "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
-        "[--svc-return <service>=<value>] [--svc-return-caller <service>@<caller>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
+        "[--svc-return <service>=<value>] [--svc-return-caller <service>@<caller>=<value>] [--svc-return-caller-hit <service>@<caller>#<hit>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
         "[--watch32-reg <reg>:<offset>] [--stop-on-watch32-change-reg <reg>:<offset>] [--global32 <name>=<address>] " +
         "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>] [--max-hotspots <count>] [--full-hotspots] " +
@@ -74,6 +74,12 @@ if (cliOptions.SupervisorReturnCallerOverrides.Count > 0)
 {
     Console.WriteLine(
         $"SupervisorCallerOverrides: {string.Join(", ", cliOptions.SupervisorReturnCallerOverrides.OrderBy(pair => pair.Key.ServiceCode).ThenBy(pair => pair.Key.CallerProgramCounter).Select(pair => $"0x{pair.Key.ServiceCode:X8}@0x{pair.Key.CallerProgramCounter:X8}=0x{pair.Value:X8}"))}");
+}
+
+if (cliOptions.SupervisorReturnCallerHitOverrides.Count > 0)
+{
+    Console.WriteLine(
+        $"SupervisorCallerHitOverrides: {string.Join(", ", cliOptions.SupervisorReturnCallerHitOverrides.OrderBy(pair => pair.Key.ServiceCode).ThenBy(pair => pair.Key.CallerProgramCounter).ThenBy(pair => pair.Key.Hit).Select(pair => $"0x{pair.Key.ServiceCode:X8}@0x{pair.Key.CallerProgramCounter:X8}#{pair.Key.Hit}=0x{pair.Value:X8}"))}");
 }
 
 if (cliOptions.MemoryWriteOverrides.Count > 0)
@@ -244,12 +250,14 @@ try
     if (powerPcCore is not null)
     {
         if (cliOptions.SupervisorReturnOverrides.Count > 0 ||
-            cliOptions.SupervisorReturnCallerOverrides.Count > 0)
+            cliOptions.SupervisorReturnCallerOverrides.Count > 0 ||
+            cliOptions.SupervisorReturnCallerHitOverrides.Count > 0)
         {
             powerPcCore.SupervisorCallHandler = new OverrideReturnPowerPcSupervisorCallHandler(
                 powerPcCore.SupervisorCallHandler,
                 cliOptions.SupervisorReturnOverrides,
-                cliOptions.SupervisorReturnCallerOverrides);
+                cliOptions.SupervisorReturnCallerOverrides,
+                cliOptions.SupervisorReturnCallerHitOverrides);
         }
 
         supervisorTracer = new PowerPcTracingSupervisorCallHandler(powerPcCore.SupervisorCallHandler);
@@ -697,6 +705,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var tailLength = DefaultTailLength;
     var supervisorReturnOverrides = new Dictionary<uint, uint>();
     var supervisorReturnCallerOverrides = new Dictionary<SupervisorCallsiteKey, uint>();
+    var supervisorReturnCallerHitOverrides = new Dictionary<SupervisorCallsiteHitKey, uint>();
     var memoryWriteOverrides = new Dictionary<uint, uint>();
     var additionalInstructionWindows = new List<InstructionWindowRequest>();
     var watchWordAddresses = new List<uint>();
@@ -778,6 +787,11 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 var supervisorCallerOverride = ParseSupervisorReturnCallerOverride(optionValue);
                 supervisorReturnCallerOverrides[supervisorCallerOverride.Callsite] = supervisorCallerOverride.ReturnValue;
                 break;
+            case "--svc-return-caller-hit":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                var supervisorCallerHitOverride = ParseSupervisorReturnCallerHitOverride(optionValue);
+                supervisorReturnCallerHitOverrides[supervisorCallerHitOverride.CallsiteHit] = supervisorCallerHitOverride.ReturnValue;
+                break;
             case "--poke32":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 var memoryOverride = ParseSupervisorReturnOverride(optionValue);
@@ -856,6 +870,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         tailLength,
         supervisorReturnOverrides,
         supervisorReturnCallerOverrides,
+        supervisorReturnCallerHitOverrides,
         memoryWriteOverrides,
         additionalInstructionWindows,
         watchWordAddresses,
@@ -1070,6 +1085,43 @@ static (SupervisorCallsiteKey Callsite, uint ReturnValue) ParseSupervisorReturnC
     var serviceCode = ParseUInt32Flexible(callsiteToken[..atSeparator]);
     var callerProgramCounter = ParseUInt32Flexible(callsiteToken[(atSeparator + 1)..]);
     return (new SupervisorCallsiteKey(serviceCode, callerProgramCounter), returnValue);
+}
+
+static (SupervisorCallsiteHitKey CallsiteHit, uint ReturnValue) ParseSupervisorReturnCallerHitOverride(string token)
+{
+    var equalsSeparator = token.IndexOf('=');
+
+    if (equalsSeparator <= 0 || equalsSeparator == token.Length - 1)
+    {
+        throw new ArgumentException(
+            $"Invalid supervisor caller-hit override '{token}'. Expected format '<service>@<caller>#<hit>=<value>'.");
+    }
+
+    var callsiteToken = token[..equalsSeparator];
+    var returnValue = ParseUInt32Flexible(token[(equalsSeparator + 1)..]);
+    var hashSeparator = callsiteToken.IndexOf('#');
+
+    if (hashSeparator <= 0 || hashSeparator == callsiteToken.Length - 1)
+    {
+        throw new ArgumentException(
+            $"Invalid supervisor caller-hit override '{token}'. Expected format '<service>@<caller>#<hit>=<value>'.");
+    }
+
+    var callsitePart = callsiteToken[..hashSeparator];
+    var hitToken = callsiteToken[(hashSeparator + 1)..];
+    var callerOverride = ParseSupervisorReturnCallerOverride($"{callsitePart}=0");
+    var hit = ParsePositiveLongOption("--svc-return-caller-hit", hitToken);
+
+    if (hit > int.MaxValue)
+    {
+        throw new ArgumentException("Option '--svc-return-caller-hit' requires hit count <= 2147483647.");
+    }
+
+    var key = new SupervisorCallsiteHitKey(
+        callerOverride.Callsite.ServiceCode,
+        callerOverride.Callsite.CallerProgramCounter,
+        (int)hit);
+    return (key, returnValue);
 }
 
 static (uint ProgramCounter, long RequiredHits) ParseProgramCounterHitStop(string optionName, string token)
@@ -2251,6 +2303,7 @@ file sealed record ProbeCliOptions(
     int TailLength,
     IReadOnlyDictionary<uint, uint> SupervisorReturnOverrides,
     IReadOnlyDictionary<SupervisorCallsiteKey, uint> SupervisorReturnCallerOverrides,
+    IReadOnlyDictionary<SupervisorCallsiteHitKey, uint> SupervisorReturnCallerHitOverrides,
     IReadOnlyDictionary<uint, uint> MemoryWriteOverrides,
     IReadOnlyList<InstructionWindowRequest> AdditionalInstructionWindows,
     IReadOnlyList<uint> WatchWordAddresses,
@@ -2358,6 +2411,11 @@ file readonly record struct SupervisorCallsiteKey(
     uint ServiceCode,
     uint CallerProgramCounter);
 
+file readonly record struct SupervisorCallsiteHitKey(
+    uint ServiceCode,
+    uint CallerProgramCounter,
+    int Hit);
+
 file sealed class StopOnSupervisorServicePowerPcSupervisorCallHandler : IPowerPcSupervisorCallHandler
 {
     private readonly IPowerPcSupervisorCallHandler _inner;
@@ -2392,20 +2450,33 @@ file sealed class OverrideReturnPowerPcSupervisorCallHandler : IPowerPcSuperviso
     private readonly IPowerPcSupervisorCallHandler _inner;
     private readonly IReadOnlyDictionary<uint, uint> _overrides;
     private readonly IReadOnlyDictionary<SupervisorCallsiteKey, uint> _callsiteOverrides;
+    private readonly IReadOnlyDictionary<SupervisorCallsiteHitKey, uint> _callsiteHitOverrides;
+    private readonly Dictionary<SupervisorCallsiteKey, int> _callsiteHitCounters = new();
 
     public OverrideReturnPowerPcSupervisorCallHandler(
         IPowerPcSupervisorCallHandler inner,
         IReadOnlyDictionary<uint, uint> overrides,
-        IReadOnlyDictionary<SupervisorCallsiteKey, uint> callsiteOverrides)
+        IReadOnlyDictionary<SupervisorCallsiteKey, uint> callsiteOverrides,
+        IReadOnlyDictionary<SupervisorCallsiteHitKey, uint> callsiteHitOverrides)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _overrides = overrides ?? throw new ArgumentNullException(nameof(overrides));
         _callsiteOverrides = callsiteOverrides ?? throw new ArgumentNullException(nameof(callsiteOverrides));
+        _callsiteHitOverrides = callsiteHitOverrides ?? throw new ArgumentNullException(nameof(callsiteHitOverrides));
     }
 
     public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
     {
         var callsiteKey = new SupervisorCallsiteKey(context.ServiceCode, context.CallerProgramCounter);
+        _callsiteHitCounters.TryGetValue(callsiteKey, out var currentCallsiteHits);
+        var nextHit = currentCallsiteHits + 1;
+        _callsiteHitCounters[callsiteKey] = nextHit;
+        var callsiteHitKey = new SupervisorCallsiteHitKey(callsiteKey.ServiceCode, callsiteKey.CallerProgramCounter, nextHit);
+
+        if (_callsiteHitOverrides.TryGetValue(callsiteHitKey, out var callsiteHitReturnValue))
+        {
+            return new PowerPcSupervisorCallResult(callsiteHitReturnValue);
+        }
 
         if (_callsiteOverrides.TryGetValue(callsiteKey, out var callsiteReturnValue))
         {
