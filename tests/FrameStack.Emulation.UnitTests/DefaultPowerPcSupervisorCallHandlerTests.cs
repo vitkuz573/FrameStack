@@ -21,11 +21,9 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
     }
 
     [Fact]
-    public void HandleShouldReturnProbeSizeForSecondaryCiscoRamProbeCall()
+    public void HandleShouldReturnRequestedProbeChunkWhenItFitsReportedMemory()
     {
-        var handler = new DefaultPowerPcSupervisorCallHandler(
-            reportedMemoryBytes: 0x1000_0000,
-            enableCiscoC2600SmartInitProfile: true);
+        var handler = new DefaultPowerPcSupervisorCallHandler(0x1000_0000);
 
         var result = handler.Handle(new PowerPcSupervisorCallContext(
             ProgramCounter: 0,
@@ -39,39 +37,35 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
     }
 
     [Fact]
-    public void HandleShouldCapPrimaryCiscoRamProbeToSafeCeiling()
+    public void HandleShouldFallbackToReportedMemoryWhenProbeChunkExceedsMemory()
     {
-        var handler = new DefaultPowerPcSupervisorCallHandler(
-            reportedMemoryBytes: 0x1000_0000,
-            enableCiscoC2600SmartInitProfile: true);
+        var handler = new DefaultPowerPcSupervisorCallHandler(0x0800_0000);
 
         var result = handler.Handle(new PowerPcSupervisorCallContext(
             ProgramCounter: 0,
             ServiceCode: 0x04,
-            Argument0: 0x1000,
-            Argument1: 0x0C00_0000,
+            Argument0: 0x1000_0000,
+            Argument1: 0,
             Argument2: 0,
             Argument3: 0));
 
-        Assert.Equal(0x0A80_0000u, result.ReturnValue);
+        Assert.Equal(0x0800_0000u, result.ReturnValue);
     }
 
     [Fact]
-    public void HandleShouldApplyProbeHeadroomForCiscoC2600Profile()
+    public void HandleShouldFallbackToReportedMemoryForNonZeroProbeMode()
     {
-        var handler = new DefaultPowerPcSupervisorCallHandler(
-            reportedMemoryBytes: 0x0800_0000,
-            enableCiscoC2600SmartInitProfile: true);
+        var handler = new DefaultPowerPcSupervisorCallHandler(0x0800_0000);
 
         var result = handler.Handle(new PowerPcSupervisorCallContext(
             ProgramCounter: 0,
             ServiceCode: 0x04,
-            Argument0: 0x1000,
+            Argument0: 0x0040_0000,
             Argument1: 0x0C00_0000,
             Argument2: 0,
             Argument3: 0));
 
-        Assert.Equal(0x0780_0000u, result.ReturnValue);
+        Assert.Equal(0x0800_0000u, result.ReturnValue);
     }
 
     [Fact]

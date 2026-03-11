@@ -210,30 +210,36 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
-    public void ReadSpecialPurposeRegisterMtwbShouldUseControlRegisterIndexBitsWhenPresent()
-    {
-        var cpu = new PowerPc32CpuCore();
-
-        cpu.WriteSpecialPurposeRegister(796, 0x0345_0000); // M_TWB base
-        cpu.WriteSpecialPurposeRegister(792, 0x1600_1F00); // MD_CTR with slot index 31
-
-        var descriptorPointer = cpu.ReadSpecialPurposeRegister(796);
-
-        Assert.Equal(0x0345_007Cu, descriptorPointer);
-    }
-
-    [Fact]
-    public void ReadSpecialPurposeRegisterMtwbShouldKeepSlotZeroWhenControlRegisterInitialized()
+    public void ReadSpecialPurposeRegisterMtwbShouldUseEffectivePageNumberIndex()
     {
         var cpu = new PowerPc32CpuCore();
 
         cpu.WriteSpecialPurposeRegister(796, 0x0345_0000); // M_TWB base
         cpu.WriteSpecialPurposeRegister(795, 0x8F00_0200); // MD_EPN
-        cpu.WriteSpecialPurposeRegister(792, 0x1600_0000); // MD_CTR slot index 0
+        cpu.WriteSpecialPurposeRegister(792, 0x1600_1F00); // MD_CTR with slot index 31
 
         var descriptorPointer = cpu.ReadSpecialPurposeRegister(796);
 
-        Assert.Equal(0x0345_0000u, descriptorPointer);
+        Assert.Equal(0x0345_08F0u, descriptorPointer);
+    }
+
+    [Fact]
+    public void ReadSpecialPurposeRegisterMtwbShouldSelectInstructionOrDataEpnByActiveControlRegister()
+    {
+        var cpu = new PowerPc32CpuCore();
+
+        cpu.WriteSpecialPurposeRegister(796, 0x0345_0000); // M_TWB base
+        cpu.WriteSpecialPurposeRegister(795, 0x8F00_0200); // MD_EPN
+        cpu.WriteSpecialPurposeRegister(787, 0x8100_1200); // MI_EPN
+
+        cpu.WriteSpecialPurposeRegister(792, 0x1600_0000); // MD_CTR
+        var dataDescriptorPointer = cpu.ReadSpecialPurposeRegister(796);
+
+        cpu.WriteSpecialPurposeRegister(784, 0x0200_0000); // MI_CTR
+        var instructionDescriptorPointer = cpu.ReadSpecialPurposeRegister(796);
+
+        Assert.Equal(0x0345_08F0u, dataDescriptorPointer);
+        Assert.Equal(0x0345_0810u, instructionDescriptorPointer);
     }
 
     [Fact]
@@ -513,6 +519,27 @@ public sealed class PowerPc32CpuCoreTests
         }
 
         Assert.Equal(0xDEAD_BEEFu, cpu.Registers[5]);
+    }
+
+    [Fact]
+    public void InstructionFetchShouldUseInstalledMpc8xxInstructionTlbEntryWhenRelocationEnabled()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x0000_1000, 0x3860_0011); // li r3, 0x11 (effective address stream)
+        memory.WriteUInt32(0x0000_3000, 0x3860_0055); // li r3, 0x55 (translated physical address)
+
+        cpu.Reset(0x1000);
+        cpu.WriteMachineStateRegister(0x0000_0020); // Instruction relocation enabled.
+        cpu.WriteSpecialPurposeRegister(784, 0x0200_0000); // MI_CTR index 0
+        cpu.WriteSpecialPurposeRegister(787, 0x0000_1200); // MI_EPN for EA 0x1000 with valid bit
+        cpu.WriteSpecialPurposeRegister(790, 0x0000_3000); // MI_RPN for PA 0x3000
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x55u, cpu.Registers[3]);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
     }
 
     [Fact]

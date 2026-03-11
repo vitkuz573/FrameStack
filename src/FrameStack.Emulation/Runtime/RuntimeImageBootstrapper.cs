@@ -41,7 +41,7 @@ public sealed class RuntimeImageBootstrapper
             memoryBus.LoadBytes(segment.VirtualAddress, segment.Data);
         }
 
-        var cpuCore = CreateCpuCore(loadedImage, inspection, memoryMb);
+        var cpuCore = CreateCpuCore(loadedImage, memoryMb);
         var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
 
         ApplyDefaultCpuInitialization(cpuCore, loadedImage, memoryMb);
@@ -72,7 +72,6 @@ public sealed class RuntimeImageBootstrapper
 
     private static FrameStack.Emulation.Abstractions.ICpuCore CreateCpuCore(
         LoadedImage loadedImage,
-        ImageInspectionResult inspection,
         int memoryMb)
     {
         if (loadedImage.Architecture == ImageArchitecture.Mips32 &&
@@ -91,14 +90,7 @@ public sealed class RuntimeImageBootstrapper
             loadedImage.Endianness == ImageEndianness.BigEndian)
         {
             var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb);
-            var useCiscoC2600SmartInitProfile = string.Equals(
-                inspection.CiscoFamily,
-                "C2600",
-                StringComparison.OrdinalIgnoreCase);
-
-            return new PowerPc32CpuCore(new DefaultPowerPcSupervisorCallHandler(
-                reportedMemoryBytes,
-                useCiscoC2600SmartInitProfile));
+            return new PowerPc32CpuCore(new DefaultPowerPcSupervisorCallHandler(reportedMemoryBytes));
         }
 
         throw new NotSupportedException(

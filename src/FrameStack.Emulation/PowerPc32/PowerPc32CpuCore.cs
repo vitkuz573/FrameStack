@@ -181,7 +181,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         var pc = _registers.Pc;
-        var instructionWord = memoryBus.ReadUInt32(pc);
+        var instructionWord = memoryBus.ReadUInt32(TranslateInstructionAddress(pc));
         var instruction = new PowerPcInstruction(instructionWord);
 
         switch (instruction.Opcode)
@@ -1347,38 +1347,57 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private uint ComputeMpc8xxLevelOneDescriptorPointer()
     {
         var tableBase = _extendedSpr.GetValueOrDefault(Mpc8xxTableWalkBaseSpr, 0u) & Mpc8xxTableBaseMask;
-        var levelOneIndex = ResolveMpc8xxLevelOneIndex();
+        var levelOneIndex = ResolveMpc8xxLevelOneIndex(GetMpc8xxActiveEffectivePageNumber());
         return tableBase | levelOneIndex;
     }
 
-    private uint ResolveMpc8xxLevelOneIndex()
+    private static uint ResolveMpc8xxLevelOneIndex(uint effectivePageNumber)
     {
-        if (_extendedSpr.TryGetValue(_lastMpc8xxControlSpr, out var controlValue))
-        {
-            // PPC MB/ME bit numbering stores the 5-bit TLB slot in bits 8..12.
-            return ((controlValue >> 8) & 0x1Fu) << 2;
-        }
-
-        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
         return (effectivePageNumber >> 20) & Mpc8xxLevelOneIndexMask;
     }
 
     private uint ComputeMpc8xxLevelTwoDescriptorPointer()
     {
-        var levelTwoTableBase = _extendedSpr.GetValueOrDefault(Mpc8xxDataTableWalkControlSpr, 0u) & Mpc8xxTableBaseMask;
-        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
+        var levelTwoTableBaseSpr = _lastMpc8xxControlSpr == Mpc8xxInstructionControlSpr
+            ? Mpc8xxInstructionTableWalkControlSpr
+            : Mpc8xxDataTableWalkControlSpr;
+        var levelTwoTableBase = _extendedSpr.GetValueOrDefault(levelTwoTableBaseSpr, 0u) & Mpc8xxTableBaseMask;
+
+        if (levelTwoTableBase == 0)
+        {
+            levelTwoTableBase = _extendedSpr.GetValueOrDefault(Mpc8xxTableWalkBaseSpr, 0u) & Mpc8xxTableBaseMask;
+        }
+
+        var effectivePageNumber = GetMpc8xxActiveEffectivePageNumber();
         var levelTwoIndex = (effectivePageNumber >> 10) & Mpc8xxLevelTwoIndexMask;
         return levelTwoTableBase | levelTwoIndex;
     }
 
-    private uint GetMpc8xxTableWalkEffectivePageNumber()
+    private uint GetMpc8xxActiveEffectivePageNumber()
     {
-        if (_extendedSpr.TryGetValue(Mpc8xxDataEpnSpr, out var dataEpn))
+        if (_lastMpc8xxControlSpr == Mpc8xxInstructionControlSpr &&
+            _extendedSpr.TryGetValue(Mpc8xxInstructionEpnSpr, out var instructionEpn))
+        {
+            return instructionEpn;
+        }
+
+        if (_lastMpc8xxControlSpr == Mpc8xxDataControlSpr &&
+            _extendedSpr.TryGetValue(Mpc8xxDataEpnSpr, out var dataEpn))
         {
             return dataEpn;
         }
 
-        return _extendedSpr.GetValueOrDefault(Mpc8xxInstructionEpnSpr, 0u);
+        if (_extendedSpr.TryGetValue(Mpc8xxInstructionEpnSpr, out instructionEpn))
+        {
+            return instructionEpn;
+        }
+
+        if (_extendedSpr.TryGetValue(Mpc8xxDataEpnSpr, out dataEpn))
+        {
+            return dataEpn;
+        }
+
+        return 0u;
     }
 
     private uint ReadSpr(int spr)
