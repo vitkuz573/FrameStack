@@ -25,7 +25,7 @@ if (args.Length == 0)
         "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--resume-halted] [--chunk-budget <instructions>] " +
         "[--svc-return <service>=<value>] [--svc-return-caller <service>@<caller>=<value>] [--svc-return-caller-hit <service>@<caller>#<hit>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
-        "[--watch32-reg <reg>:<offset>] [--stop-on-watch32-change-reg <reg>:<offset>] [--global32 <name>=<address>] " +
+        "[--watch32-reg <reg>:<offset>] [--watch32-ea <effective-address>] [--stop-on-watch32-change-reg <reg>:<offset>] [--stop-on-watch32-change-ea <effective-address>] [--global32 <name>=<address>] [--global32-ea <name>=<effective-address>] " +
         "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>] [--max-hotspots <count>] [--full-hotspots] " +
         "[--progress-every <instructions>] [--report-json <path>] [--profile <name>]");
     return 1;
@@ -127,6 +127,12 @@ if (cliOptions.DynamicWatchWordRequests.Count > 0)
         $"Watch32Reg: {string.Join(", ", cliOptions.DynamicWatchWordRequests.Select(FormatDynamicWatchWordRequest))}");
 }
 
+if (cliOptions.WatchWordEffectiveAddresses.Count > 0)
+{
+    Console.WriteLine(
+        $"Watch32EA: {string.Join(", ", cliOptions.WatchWordEffectiveAddresses.Select(address => $"0x{address:X8}"))}");
+}
+
 if (cliOptions.StopOnWatchWordChangeAddresses.Count > 0)
 {
     Console.WriteLine(
@@ -139,10 +145,22 @@ if (cliOptions.DynamicStopOnWatchWordChangeRequests.Count > 0)
         $"StopOnWatch32ChangeReg: {string.Join(", ", cliOptions.DynamicStopOnWatchWordChangeRequests.Select(FormatDynamicWatchWordRequest))}");
 }
 
+if (cliOptions.StopOnWatchWordChangeEffectiveAddresses.Count > 0)
+{
+    Console.WriteLine(
+        $"StopOnWatch32ChangeEA: {string.Join(", ", cliOptions.StopOnWatchWordChangeEffectiveAddresses.Select(address => $"0x{address:X8}"))}");
+}
+
 if (cliOptions.NamedGlobalAddresses.Count > 0)
 {
     Console.WriteLine(
         $"Global32: {string.Join(", ", cliOptions.NamedGlobalAddresses.OrderBy(entry => entry.Name, StringComparer.Ordinal).Select(entry => $"{entry.Name}=0x{entry.Address:X8}"))}");
+}
+
+if (cliOptions.NamedGlobalEffectiveAddresses.Count > 0)
+{
+    Console.WriteLine(
+        $"Global32EA: {string.Join(", ", cliOptions.NamedGlobalEffectiveAddresses.OrderBy(entry => entry.Name, StringComparer.Ordinal).Select(entry => $"{entry.Name}=0x{entry.Address:X8}"))}");
 }
 
 if (cliOptions.TrackedProgramCounters.Count > 0)
@@ -254,10 +272,13 @@ try
 
     if (powerPcCore is null &&
         (cliOptions.DynamicWatchWordRequests.Count > 0 ||
-         cliOptions.DynamicStopOnWatchWordChangeRequests.Count > 0))
+         cliOptions.WatchWordEffectiveAddresses.Count > 0 ||
+         cliOptions.DynamicStopOnWatchWordChangeRequests.Count > 0 ||
+         cliOptions.StopOnWatchWordChangeEffectiveAddresses.Count > 0 ||
+         cliOptions.NamedGlobalEffectiveAddresses.Count > 0))
     {
         throw new NotSupportedException(
-            "Dynamic watch options (--watch32-reg/--stop-on-watch32-change-reg) are currently supported only for PowerPC32 images.");
+            "PowerPC-specific options (--watch32-reg, --watch32-ea, --stop-on-watch32-change-reg, --stop-on-watch32-change-ea, --global32-ea) are currently supported only for PowerPC32 images.");
     }
 
     if (powerPcCore is not null)
@@ -348,8 +369,10 @@ try
         cliOptions.TailLength,
         cliOptions.WatchWordAddresses,
         cliOptions.DynamicWatchWordRequests,
+        cliOptions.WatchWordEffectiveAddresses,
         cliOptions.StopOnWatchWordChangeAddresses,
         cliOptions.DynamicStopOnWatchWordChangeRequests,
+        cliOptions.StopOnWatchWordChangeEffectiveAddresses,
         powerPcCore,
         cliOptions.ProgressEveryInstructions,
         progress =>
@@ -453,9 +476,14 @@ try
         PrintSpecialPurposeRegisters(powerPcCore);
     }
 
-    var namedGlobals = ReadNamedGlobals(state.Machine, cliOptions.NamedGlobalAddresses);
+    var namedGlobals = ReadNamedGlobals(
+        state.Machine,
+        cliOptions.NamedGlobalAddresses,
+        powerPcCore,
+        cliOptions.NamedGlobalEffectiveAddresses);
     PrintNamedGlobals(namedGlobals);
     PrintDynamicWatch(state.Machine, powerPcCore, cliOptions.DynamicWatchWordRequests);
+    PrintEffectiveWatch(state.Machine, powerPcCore, cliOptions.WatchWordEffectiveAddresses);
     Console.WriteLine("HotSpots:");
 
     var topHotSpots = hotSpotCounters
@@ -730,10 +758,13 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var additionalInstructionWindows = new List<InstructionWindowRequest>();
     var watchWordAddresses = new List<uint>();
     var dynamicWatchWordRequests = new List<DynamicWatchWordRequest>();
+    var watchWordEffectiveAddresses = new List<uint>();
     var stopOnWatchWordChangeAddresses = new HashSet<uint>();
     var dynamicStopOnWatchWordChangeRequests = new List<DynamicWatchWordRequest>();
+    var stopOnWatchWordChangeEffectiveAddresses = new HashSet<uint>();
     var trackedProgramCounters = new List<uint>();
     var namedGlobalAddresses = new List<NamedAddress>();
+    var namedGlobalEffectiveAddresses = new List<NamedAddress>();
     var profileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var registerOverrideTokens = new List<string>();
 
@@ -849,6 +880,10 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 AddDistinct(dynamicWatchWordRequests, ParseDynamicWatchWordRequest(optionName, optionValue));
                 break;
+            case "--watch32-ea":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                AddDistinct(watchWordEffectiveAddresses, ParseUInt32Flexible(optionValue));
+                break;
             case "--stop-on-watch32-change":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 stopOnWatchWordChangeAddresses.Add(ParseUInt32Flexible(optionValue));
@@ -857,9 +892,17 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 AddDistinct(dynamicStopOnWatchWordChangeRequests, ParseDynamicWatchWordRequest(optionName, optionValue));
                 break;
+            case "--stop-on-watch32-change-ea":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                stopOnWatchWordChangeEffectiveAddresses.Add(ParseUInt32Flexible(optionValue));
+                break;
             case "--global32":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 AddDistinct(namedGlobalAddresses, ParseNamedAddress(optionName, optionValue));
+                break;
+            case "--global32-ea":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                AddDistinct(namedGlobalEffectiveAddresses, ParseNamedAddress(optionName, optionValue));
                 break;
             case "--count-pc":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
@@ -899,10 +942,13 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         additionalInstructionWindows,
         watchWordAddresses,
         dynamicWatchWordRequests,
+        watchWordEffectiveAddresses,
         stopOnWatchWordChangeAddresses.ToArray(),
         dynamicStopOnWatchWordChangeRequests,
+        stopOnWatchWordChangeEffectiveAddresses.ToArray(),
         trackedProgramCounters,
         namedGlobalAddresses,
+        namedGlobalEffectiveAddresses,
         profileNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray(),
         registerOverrideTokens.ToArray());
 }
@@ -1285,9 +1331,11 @@ static string FormatDynamicWatchWordRequest(DynamicWatchWordRequest request)
 static IReadOnlyList<uint> ResolveWatchWordAddresses(
     IReadOnlyList<uint> staticAddresses,
     IReadOnlyList<DynamicWatchWordRequest> dynamicRequests,
+    IReadOnlyList<uint> effectiveAddresses,
     PowerPc32CpuCore? powerPcCore)
 {
-    if (dynamicRequests.Count == 0)
+    if (dynamicRequests.Count == 0 &&
+        effectiveAddresses.Count == 0)
     {
         return staticAddresses;
     }
@@ -1309,6 +1357,12 @@ static IReadOnlyList<uint> ResolveWatchWordAddresses(
         var registerValue = powerPcCore.Registers[request.RegisterIndex];
         var resolvedAddress = unchecked(registerValue + (uint)request.Offset);
         AddDistinct(resolvedAddresses, resolvedAddress);
+    }
+
+    foreach (var effectiveAddress in effectiveAddresses)
+    {
+        var translatedAddress = powerPcCore.TranslateDataAddressForDebug(effectiveAddress);
+        AddDistinct(resolvedAddresses, translatedAddress);
     }
 
     return resolvedAddresses;
@@ -1437,8 +1491,10 @@ static TracedRunResult RunBudgetWithTrace(
     int tailLength,
     IReadOnlyList<uint> staticWatchWordAddresses,
     IReadOnlyList<DynamicWatchWordRequest> dynamicWatchWordRequests,
+    IReadOnlyList<uint> effectiveWatchWordAddresses,
     IReadOnlyList<uint> stopOnWatchWordChangeAddresses,
     IReadOnlyList<DynamicWatchWordRequest> dynamicStopOnWatchWordChangeRequests,
+    IReadOnlyList<uint> stopOnWatchWordChangeEffectiveAddresses,
     PowerPc32CpuCore? powerPcCore,
     long progressEveryInstructions,
     Action<TraceProgress>? progressCallback)
@@ -1473,10 +1529,12 @@ static TracedRunResult RunBudgetWithTrace(
         currentWatchWordAddresses = ResolveWatchWordAddresses(
             staticWatchWordAddresses,
             dynamicWatchWordRequests,
+            effectiveWatchWordAddresses,
             powerPcCore);
         var currentStopOnWatchWordChangeAddresses = ResolveWatchWordAddresses(
             stopOnWatchWordChangeAddresses,
             dynamicStopOnWatchWordChangeRequests,
+            stopOnWatchWordChangeEffectiveAddresses,
             powerPcCore);
         var currentTraceWatchWordAddresses = currentWatchWordAddresses
             .Concat(currentStopOnWatchWordChangeAddresses)
@@ -2704,18 +2762,36 @@ static void PrintSpecialPurposeRegisters(PowerPc32CpuCore powerPcCore)
 
 static IReadOnlyDictionary<string, uint> ReadNamedGlobals(
     EmulationMachine machine,
-    IReadOnlyList<NamedAddress> namedAddresses)
+    IReadOnlyList<NamedAddress> namedAddresses,
+    PowerPc32CpuCore? powerPcCore,
+    IReadOnlyList<NamedAddress> namedEffectiveAddresses)
 {
-    if (namedAddresses.Count == 0)
+    if (namedAddresses.Count == 0 &&
+        namedEffectiveAddresses.Count == 0)
     {
         return new Dictionary<string, uint>(0, StringComparer.Ordinal);
     }
 
-    var values = new Dictionary<string, uint>(namedAddresses.Count, StringComparer.Ordinal);
+    var values = new Dictionary<string, uint>(namedAddresses.Count + namedEffectiveAddresses.Count, StringComparer.Ordinal);
 
     foreach (var namedAddress in namedAddresses)
     {
         values[namedAddress.Name] = machine.ReadUInt32(namedAddress.Address);
+    }
+
+    if (namedEffectiveAddresses.Count > 0)
+    {
+        if (powerPcCore is null)
+        {
+            throw new NotSupportedException(
+                "Effective global addresses (--global32-ea) require PowerPC32 runtime state.");
+        }
+
+        foreach (var namedAddress in namedEffectiveAddresses)
+        {
+            var translatedAddress = powerPcCore.TranslateDataAddressForDebug(namedAddress.Address);
+            values[namedAddress.Name] = machine.ReadUInt32(translatedAddress);
+        }
     }
 
     return values;
@@ -2755,6 +2831,27 @@ static void PrintDynamicWatch(
         var watchName = FormatDynamicWatchWordRequest(request);
         Console.WriteLine(
             $"  [{watchName}] BASE=0x{registerValue:X8} ADDR=0x{resolvedAddress:X8} VALUE=0x{machine.ReadUInt32(resolvedAddress):X8}");
+    }
+}
+
+static void PrintEffectiveWatch(
+    EmulationMachine machine,
+    PowerPc32CpuCore? powerPcCore,
+    IReadOnlyList<uint> effectiveWatchWordAddresses)
+{
+    if (powerPcCore is null || effectiveWatchWordAddresses.Count == 0)
+    {
+        return;
+    }
+
+    Console.WriteLine("EffectiveWatch32:");
+
+    foreach (var effectiveAddress in effectiveWatchWordAddresses.Distinct().OrderBy(address => address))
+    {
+        var translatedAddress = powerPcCore.TranslateDataAddressForDebug(effectiveAddress);
+        var value = machine.ReadUInt32(translatedAddress);
+        Console.WriteLine(
+            $"  EA=0x{effectiveAddress:X8} PA=0x{translatedAddress:X8} VALUE=0x{value:X8}");
     }
 }
 
@@ -3038,10 +3135,13 @@ file sealed record ProbeCliOptions(
     IReadOnlyList<InstructionWindowRequest> AdditionalInstructionWindows,
     IReadOnlyList<uint> WatchWordAddresses,
     IReadOnlyList<DynamicWatchWordRequest> DynamicWatchWordRequests,
+    IReadOnlyList<uint> WatchWordEffectiveAddresses,
     IReadOnlyList<uint> StopOnWatchWordChangeAddresses,
     IReadOnlyList<DynamicWatchWordRequest> DynamicStopOnWatchWordChangeRequests,
+    IReadOnlyList<uint> StopOnWatchWordChangeEffectiveAddresses,
     IReadOnlyList<uint> TrackedProgramCounters,
     IReadOnlyList<NamedAddress> NamedGlobalAddresses,
+    IReadOnlyList<NamedAddress> NamedGlobalEffectiveAddresses,
     IReadOnlyList<string> ProfileNames,
     string[] RegisterOverrideTokens);
 
