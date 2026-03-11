@@ -41,7 +41,7 @@ public sealed class RuntimeImageBootstrapper
             memoryBus.LoadBytes(segment.VirtualAddress, segment.Data);
         }
 
-        var cpuCore = CreateCpuCore(loadedImage, memoryMb);
+        var cpuCore = CreateCpuCore(loadedImage, inspection, memoryMb);
         var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
 
         ApplyDefaultCpuInitialization(cpuCore, loadedImage, memoryMb);
@@ -72,6 +72,7 @@ public sealed class RuntimeImageBootstrapper
 
     private static FrameStack.Emulation.Abstractions.ICpuCore CreateCpuCore(
         LoadedImage loadedImage,
+        ImageInspectionResult inspection,
         int memoryMb)
     {
         if (loadedImage.Architecture == ImageArchitecture.Mips32 &&
@@ -90,7 +91,12 @@ public sealed class RuntimeImageBootstrapper
             loadedImage.Endianness == ImageEndianness.BigEndian)
         {
             var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb);
-            return new PowerPc32CpuCore(new DefaultPowerPcSupervisorCallHandler(reportedMemoryBytes));
+            var nullProgramCounterRedirectPolicy =
+                ResolvePowerPcNullProgramCounterRedirectPolicy(loadedImage, inspection);
+
+            return new PowerPc32CpuCore(
+                new DefaultPowerPcSupervisorCallHandler(reportedMemoryBytes),
+                nullProgramCounterRedirectPolicy);
         }
 
         throw new NotSupportedException(
@@ -101,6 +107,15 @@ public sealed class RuntimeImageBootstrapper
     {
         const uint oneMb = 1024u * 1024u;
         return checked((uint)memoryMb * oneMb);
+    }
+
+    private static CiscoPowerPcNullProgramCounterRedirectPolicy? ResolvePowerPcNullProgramCounterRedirectPolicy(
+        LoadedImage loadedImage,
+        ImageInspectionResult inspection)
+    {
+        return string.IsNullOrWhiteSpace(inspection.CiscoFamily)
+            ? null
+            : new CiscoPowerPcNullProgramCounterRedirectPolicy(loadedImage.EntryPoint);
     }
 
     private static void ApplyDefaultCpuInitialization(

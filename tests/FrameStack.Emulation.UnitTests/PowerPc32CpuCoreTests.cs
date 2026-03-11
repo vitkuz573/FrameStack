@@ -29,6 +29,36 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void ExecuteCycleShouldRedirectFromNullProgramCounterWhenPolicyIsConfigured()
+    {
+        var cpu = new PowerPc32CpuCore(
+            new DefaultPowerPcSupervisorCallHandler(),
+            new StaticNullProgramCounterRedirectPolicy(0x1200));
+        var memory = new ArrayMemoryBus(baseAddress: 0, sizeBytes: 0x3000);
+        memory.WriteUInt32(0x1200, 0x3863_0001); // addi r3, r3, 1
+
+        cpu.Reset(0);
+        cpu.Registers[3] = 0x10;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x11u, cpu.Registers[3]);
+        Assert.Equal(0x1204u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void ExecuteCycleShouldThrowForNullProgramCounterWhenPolicyIsNotConfigured()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0, sizeBytes: 0x1000);
+        cpu.Reset(0);
+
+        var exception = Assert.Throws<NotSupportedException>(() => cpu.ExecuteCycle(memory));
+
+        Assert.Contains("opcode 0x00", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BlrlShouldBranchToPreviousLrValueAndUpdateLinkRegister()
     {
         var cpu = new PowerPc32CpuCore();
@@ -1012,6 +1042,18 @@ public sealed class PowerPc32CpuCoreTests
         public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
         {
             return callback(context);
+        }
+    }
+
+    private sealed class StaticNullProgramCounterRedirectPolicy(uint redirectTarget)
+        : IPowerPcNullProgramCounterRedirectPolicy
+    {
+        public bool TryResolveRedirectTarget(
+            PowerPc32RegisterFile registers,
+            out uint resolvedTarget)
+        {
+            resolvedTarget = redirectTarget;
+            return true;
         }
     }
 }

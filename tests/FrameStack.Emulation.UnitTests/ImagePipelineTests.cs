@@ -162,6 +162,33 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
+    public void BootstrapShouldEnableNullProgramCounterRedirectForCiscoPowerPcImages()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-null-vector-cisco",
+            imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
+            memoryMb: 64,
+            cpuInitializer: cpu =>
+            {
+                var powerPc = Assert.IsType<PowerPc32CpuCore>(cpu);
+                powerPc.Registers.Pc = 0;
+                powerPc.Registers[30] = 0x80008000;
+            });
+
+        var summary = state.Machine.Run(instructionBudget: 1);
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+
+        Assert.Equal(1, summary.ExecutedInstructions);
+        Assert.False(summary.Halted);
+        Assert.Equal(0x80008004u, summary.FinalProgramCounter);
+        Assert.Equal(0x80008004u, powerPc.ProgramCounter);
+    }
+
+    [Fact]
     public void BootstrapShouldReportAllocatedMemoryForPowerPcSupervisorService()
     {
         var bootstrapper = new RuntimeImageBootstrapper(

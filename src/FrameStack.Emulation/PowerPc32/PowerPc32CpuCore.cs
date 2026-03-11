@@ -40,19 +40,25 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private readonly Mpc8xxTlbEntry?[] _instructionTlb = new Mpc8xxTlbEntry?[32];
     private readonly Mpc8xxTlbEntry?[] _dataTlb = new Mpc8xxTlbEntry?[32];
     private readonly Dictionary<uint, long> _supervisorCallCounters = new();
+    private readonly IPowerPcNullProgramCounterRedirectPolicy? _nullProgramCounterRedirectPolicy;
     private uint _machineStateRegister;
     private ulong _timeBaseCounter;
     private int _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
 
     public PowerPc32CpuCore()
-        : this(new DefaultPowerPcSupervisorCallHandler())
+        : this(
+            new DefaultPowerPcSupervisorCallHandler(),
+            nullProgramCounterRedirectPolicy: null)
     {
     }
 
-    public PowerPc32CpuCore(IPowerPcSupervisorCallHandler supervisorCallHandler)
+    public PowerPc32CpuCore(
+        IPowerPcSupervisorCallHandler supervisorCallHandler,
+        IPowerPcNullProgramCounterRedirectPolicy? nullProgramCounterRedirectPolicy = null)
     {
         SupervisorCallHandler = supervisorCallHandler
             ?? throw new ArgumentNullException(nameof(supervisorCallHandler));
+        _nullProgramCounterRedirectPolicy = nullProgramCounterRedirectPolicy;
     }
 
     public uint ProgramCounter => _registers.Pc;
@@ -223,6 +229,13 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         var pc = _registers.Pc;
+
+        if (pc == 0)
+        {
+            TryRedirectNullProgramCounter();
+        }
+
+        pc = _registers.Pc;
         var instructionWord = memoryBus.ReadUInt32(TranslateInstructionAddress(pc));
         var instruction = new PowerPcInstruction(instructionWord);
 
@@ -560,6 +573,23 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         _registers.Pc += 4;
+    }
+
+    private bool TryRedirectNullProgramCounter()
+    {
+        if (_nullProgramCounterRedirectPolicy is null)
+        {
+            return false;
+        }
+
+        if (!_nullProgramCounterRedirectPolicy.TryResolveRedirectTarget(_registers, out var redirectTarget) ||
+            redirectTarget == 0)
+        {
+            return false;
+        }
+
+        _registers.Pc = redirectTarget;
+        return true;
     }
 
     private uint ComputeEffectiveAddress(PowerPcInstruction instruction)
