@@ -189,6 +189,48 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void MfsprMtwbShouldReturnLevelOneDescriptorPointerForCurrentEpn()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7C7C_C3A6); // mtspr 796, r3 (M_TWB)
+        memory.WriteUInt32(0x1004, 0x7C9B_C3A6); // mtspr 795, r4 (MD_EPN)
+        memory.WriteUInt32(0x1008, 0x7CBC_C2A6); // mfspr r5, 796
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x0345_0000;
+        cpu.Registers[4] = 0x8F00_0200;
+
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0345_08F0u, cpu.Registers[5]);
+    }
+
+    [Fact]
+    public void MfsprMdTwcShouldReturnLevelTwoDescriptorPointerForCurrentEpn()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7C9B_C3A6); // mtspr 795, r4 (MD_EPN)
+        memory.WriteUInt32(0x1004, 0x7CFD_C3A6); // mtspr 797, r7 (MD_TWC)
+        memory.WriteUInt32(0x1008, 0x7CDD_C2A6); // mfspr r6, 797
+
+        cpu.Reset(0x1000);
+        cpu.Registers[4] = 0x8F12_3000;
+        cpu.Registers[7] = 0x0F40_0203;
+
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0F40_048Cu, cpu.Registers[6]);
+    }
+
+    [Fact]
     public void DcbfShouldAdvanceProgramCounterWithoutMutatingMemory()
     {
         var cpu = new PowerPc32CpuCore();
@@ -224,9 +266,14 @@ public sealed class PowerPc32CpuCoreTests
 
         cpu.ExecuteCycle(memory);
 
-        for (var address = 0x1000u; address < 0x1020u; address++)
+        for (var address = 0x1010u; address < 0x1020u; address++)
         {
             Assert.Equal(0u, memory.ReadByte(address));
+        }
+
+        for (var address = 0x1000u; address < 0x1010u; address++)
+        {
+            Assert.Equal(0xAAu, memory.ReadByte(address));
         }
 
         for (var address = 0x1020u; address < 0x1040u; address++)
@@ -361,6 +408,36 @@ public sealed class PowerPc32CpuCoreTests
         cpu.ExecuteCycle(memory);
 
         Assert.Equal(0x1008u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void DataLoadShouldUseInstalledMpc8xxTlbEntry()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x1000, 0x7D18_C3A6); // mtspr 792, r8 (MD_CTR, index field)
+        memory.WriteUInt32(0x1004, 0x7C9B_C3A6); // mtspr 795, r4 (MD_EPN)
+        memory.WriteUInt32(0x1008, 0x7CFD_C3A6); // mtspr 797, r7 (MD_TWC)
+        memory.WriteUInt32(0x100C, 0x7CDE_C3A6); // mtspr 798, r6 (MD_RPN installs DTLB entry)
+        memory.WriteUInt32(0x1010, 0x80A3_0000); // lwz r5, 0(r3)
+
+        memory.WriteUInt32(0x0000_2000, 0xDEAD_BEEF);
+
+        cpu.Reset(0x1000);
+        cpu.WriteMachineStateRegister(0x0000_0010);
+        cpu.Registers[8] = 0; // Index 0
+        cpu.Registers[4] = 0x8000_0200; // EPN + valid
+        cpu.Registers[7] = 0x0000_0000;
+        cpu.Registers[6] = 0x0000_2000; // RPN
+        cpu.Registers[3] = 0x8000_0000; // Effective address mapped by entry above
+
+        for (var step = 0; step < 5; step++)
+        {
+            cpu.ExecuteCycle(memory);
+        }
+
+        Assert.Equal(0xDEAD_BEEFu, cpu.Registers[5]);
     }
 
     [Fact]

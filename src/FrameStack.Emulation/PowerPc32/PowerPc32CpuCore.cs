@@ -6,13 +6,38 @@ public sealed class PowerPc32CpuCore : ICpuCore
 {
     private const int LinkRegisterSpr = 8;
     private const int CounterRegisterSpr = 9;
-    private const uint DcbzLineSize = 32;
+    private const int Mpc8xxInstructionControlSpr = 784;
+    private const int Mpc8xxInstructionEpnSpr = 787;
+    private const int Mpc8xxInstructionTableWalkControlSpr = 789;
+    private const int Mpc8xxInstructionRealPageNumberSpr = 790;
+    private const int Mpc8xxDataControlSpr = 792;
+    private const int Mpc8xxDataEpnSpr = 795;
+    private const int Mpc8xxTableWalkBaseSpr = 796;
+    private const int Mpc8xxDataTableWalkControlSpr = 797;
+    private const int Mpc8xxDataRealPageNumberSpr = 798;
+
+    private const uint Mpc8xxTableBaseMask = 0xFFFF_F000;
+    private const uint Mpc8xxLevelOneIndexMask = 0x0000_0FFC;
+    private const uint Mpc8xxLevelTwoIndexMask = 0x0000_0FFC;
+    private const uint Mpc8xxTlbIndexMask = 0x0000_1F00;
+    private const uint Mpc8xxValidBit = 0x0000_0200;
+    private const uint Mpc8xxPageSizeMask = 0x0000_0C00;
+    private const uint Mpc8xxPageSize4Kb = 0x0000_0000;
+    private const uint Mpc8xxPageSize512Kb = 0x0000_0800;
+    private const uint Mpc8xxPageSize8Mb = 0x0000_0C00;
+    private const uint Mpc8xxPageSize16KbFlag = 0x0000_0001;
+
+    private const uint DcbzLineSize = 16;
 
     private const uint XerSoMask = 0x8000_0000;
     private const uint XerCaMask = 0x2000_0000;
+    private const uint MachineStateDataRelocationMask = 0x0000_0010;
+    private const uint MachineStateInstructionRelocationMask = 0x0000_0020;
 
     private readonly PowerPc32RegisterFile _registers = new();
     private readonly Dictionary<int, uint> _extendedSpr = new();
+    private readonly Mpc8xxTlbEntry?[] _instructionTlb = new Mpc8xxTlbEntry?[32];
+    private readonly Mpc8xxTlbEntry?[] _dataTlb = new Mpc8xxTlbEntry?[32];
     private readonly Dictionary<uint, long> _supervisorCallCounters = new();
     private uint _machineStateRegister;
     private ulong _timeBaseCounter;
@@ -114,6 +139,19 @@ public sealed class PowerPc32CpuCore : ICpuCore
             _extendedSpr[spr] = value;
         }
 
+        Array.Clear(_instructionTlb, 0, _instructionTlb.Length);
+        Array.Clear(_dataTlb, 0, _dataTlb.Length);
+
+        if (_extendedSpr.TryGetValue(Mpc8xxInstructionRealPageNumberSpr, out var instructionRpn))
+        {
+            InstallInstructionTlbEntry(instructionRpn);
+        }
+
+        if (_extendedSpr.TryGetValue(Mpc8xxDataRealPageNumberSpr, out var dataRpn))
+        {
+            InstallDataTlbEntry(dataRpn);
+        }
+
         _supervisorCallCounters.Clear();
         foreach (var (serviceCode, hits) in snapshot.SupervisorCallCounters)
         {
@@ -129,7 +167,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         var pc = _registers.Pc;
-        var instructionWord = memoryBus.ReadUInt32(pc);
+        var instructionWord = memoryBus.ReadUInt32(TranslateInstructionAddress(pc));
         var instruction = new PowerPcInstruction(instructionWord);
 
         switch (instruction.Opcode)
@@ -389,7 +427,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void ExecuteLoadWordAndZero(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
         var address = ComputeEffectiveAddress(instruction);
-        var value = memoryBus.ReadUInt32(address);
+        var value = ReadDataUInt32(memoryBus, address);
         _registers[instruction.Rt] = value;
         UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
@@ -398,7 +436,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void ExecuteLoadByteAndZero(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
         var address = ComputeEffectiveAddress(instruction);
-        var value = memoryBus.ReadByte(address);
+        var value = ReadDataByte(memoryBus, address);
         _registers[instruction.Rt] = value;
         UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
@@ -407,7 +445,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void ExecuteLoadHalfWordAndZero(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
         var address = ComputeEffectiveAddress(instruction);
-        var value = ReadUInt16(memoryBus, address);
+        var value = ReadDataUInt16(memoryBus, address);
         _registers[instruction.Rt] = value;
         UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
@@ -416,7 +454,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void ExecuteStoreWord(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
         var address = ComputeEffectiveAddress(instruction);
-        memoryBus.WriteUInt32(address, _registers[instruction.Rs]);
+        WriteDataUInt32(memoryBus, address, _registers[instruction.Rs]);
         UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
@@ -424,7 +462,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void ExecuteStoreByte(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
         var address = ComputeEffectiveAddress(instruction);
-        memoryBus.WriteByte(address, unchecked((byte)_registers[instruction.Rs]));
+        WriteDataByte(memoryBus, address, unchecked((byte)_registers[instruction.Rs]));
         UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
@@ -432,7 +470,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void ExecuteStoreHalfWord(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
         var address = ComputeEffectiveAddress(instruction);
-        WriteUInt16(memoryBus, address, unchecked((ushort)_registers[instruction.Rs]));
+        WriteDataUInt16(memoryBus, address, unchecked((ushort)_registers[instruction.Rs]));
         UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
         _registers.Pc += 4;
     }
@@ -443,7 +481,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         for (var registerIndex = instruction.Rt; registerIndex < 32; registerIndex++)
         {
-            _registers[registerIndex] = memoryBus.ReadUInt32(address);
+            _registers[registerIndex] = ReadDataUInt32(memoryBus, address);
             address = unchecked(address + 4);
         }
 
@@ -456,7 +494,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         for (var registerIndex = instruction.Rt; registerIndex < 32; registerIndex++)
         {
-            memoryBus.WriteUInt32(address, _registers[registerIndex]);
+            WriteDataUInt32(memoryBus, address, _registers[registerIndex]);
             address = unchecked(address + 4);
         }
 
@@ -488,34 +526,35 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private uint ReadIndexedWord(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        return memoryBus.ReadUInt32(ComputeIndexedAddress(instruction));
+        return ReadDataUInt32(memoryBus, ComputeIndexedAddress(instruction));
     }
 
     private uint ReadIndexedByte(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        return memoryBus.ReadByte(ComputeIndexedAddress(instruction));
+        return ReadDataByte(memoryBus, ComputeIndexedAddress(instruction));
     }
 
     private uint ReadIndexedHalfWord(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        return ReadUInt16(memoryBus, ComputeIndexedAddress(instruction));
+        return ReadDataUInt16(memoryBus, ComputeIndexedAddress(instruction));
     }
 
     private void WriteIndexedWord(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        memoryBus.WriteUInt32(ComputeIndexedAddress(instruction), _registers[instruction.Rs]);
+        WriteDataUInt32(memoryBus, ComputeIndexedAddress(instruction), _registers[instruction.Rs]);
     }
 
     private void WriteIndexedByte(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        memoryBus.WriteByte(
+        WriteDataByte(
+            memoryBus,
             ComputeIndexedAddress(instruction),
             unchecked((byte)_registers[instruction.Rs]));
     }
 
     private void WriteIndexedHalfWord(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
-        WriteUInt16(
+        WriteDataUInt16(
             memoryBus,
             ComputeIndexedAddress(instruction),
             unchecked((ushort)_registers[instruction.Rs]));
@@ -752,6 +791,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers.Pc += 4;
                 break;
             case 306: // tlbie
+                InvalidateAllMpc8xxTlbEntries();
                 _registers.Pc += 4;
                 break;
             case 266: // add
@@ -773,6 +813,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers.Pc += 4;
                 break;
             case 370: // tlbia
+                InvalidateAllMpc8xxTlbEntries();
                 _registers.Pc += 4;
                 break;
             case 371: // mftb/mftbu
@@ -1153,7 +1194,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         for (var offset = 0u; offset < DcbzLineSize; offset++)
         {
-            memoryBus.WriteByte(alignedAddress + offset, 0);
+            WriteDataByte(memoryBus, alignedAddress + offset, 0);
         }
 
         _registers.Pc += 4;
@@ -1247,7 +1288,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                     continue;
                 }
 
-                value |= memoryBus.ReadByte(address);
+                value |= ReadDataByte(memoryBus, address);
                 address++;
                 bytesRemaining--;
             }
@@ -1272,7 +1313,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
             for (var byteIndex = 0; byteIndex < 4 && bytesRemaining > 0; byteIndex++)
             {
                 var shift = 24 - (byteIndex * 8);
-                memoryBus.WriteByte(address, unchecked((byte)(sourceValue >> shift)));
+                WriteDataByte(memoryBus, address, unchecked((byte)(sourceValue >> shift)));
                 address++;
                 bytesRemaining--;
             }
@@ -1289,12 +1330,40 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return byteCount == 0 ? 32 : byteCount;
     }
 
+    private uint ComputeMpc8xxLevelOneDescriptorPointer()
+    {
+        var tableBase = _extendedSpr.GetValueOrDefault(Mpc8xxTableWalkBaseSpr, 0u) & Mpc8xxTableBaseMask;
+        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
+        var levelOneIndex = (effectivePageNumber >> 20) & Mpc8xxLevelOneIndexMask;
+        return tableBase | levelOneIndex;
+    }
+
+    private uint ComputeMpc8xxLevelTwoDescriptorPointer()
+    {
+        var levelTwoTableBase = _extendedSpr.GetValueOrDefault(Mpc8xxDataTableWalkControlSpr, 0u) & Mpc8xxTableBaseMask;
+        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
+        var levelTwoIndex = (effectivePageNumber >> 10) & Mpc8xxLevelTwoIndexMask;
+        return levelTwoTableBase | levelTwoIndex;
+    }
+
+    private uint GetMpc8xxTableWalkEffectivePageNumber()
+    {
+        if (_extendedSpr.TryGetValue(Mpc8xxDataEpnSpr, out var dataEpn))
+        {
+            return dataEpn;
+        }
+
+        return _extendedSpr.GetValueOrDefault(Mpc8xxInstructionEpnSpr, 0u);
+    }
+
     private uint ReadSpr(int spr)
     {
         return spr switch
         {
             LinkRegisterSpr => _registers.Lr,
             CounterRegisterSpr => _registers.Ctr,
+            Mpc8xxTableWalkBaseSpr => ComputeMpc8xxLevelOneDescriptorPointer(),
+            Mpc8xxDataTableWalkControlSpr => ComputeMpc8xxLevelTwoDescriptorPointer(),
             _ => _extendedSpr.GetValueOrDefault(spr, 0u)
         };
     }
@@ -1309,10 +1378,149 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case CounterRegisterSpr:
                 _registers.Ctr = value;
                 break;
+            case Mpc8xxInstructionRealPageNumberSpr:
+                _extendedSpr[spr] = value;
+                InstallInstructionTlbEntry(value);
+                break;
+            case Mpc8xxDataRealPageNumberSpr:
+                _extendedSpr[spr] = value;
+                InstallDataTlbEntry(value);
+                break;
             default:
                 _extendedSpr[spr] = value;
                 break;
         }
+    }
+
+    private void InstallInstructionTlbEntry(uint realPageNumber)
+    {
+        var index = ExtractMpc8xxTlbIndex(_extendedSpr.GetValueOrDefault(Mpc8xxInstructionControlSpr, 0u));
+        var effectivePageNumber = _extendedSpr.GetValueOrDefault(Mpc8xxInstructionEpnSpr, 0u);
+        var tableWalkControl = _extendedSpr.GetValueOrDefault(Mpc8xxInstructionTableWalkControlSpr, 0u);
+        _instructionTlb[index] = new Mpc8xxTlbEntry(effectivePageNumber, realPageNumber, tableWalkControl);
+    }
+
+    private void InstallDataTlbEntry(uint realPageNumber)
+    {
+        var index = ExtractMpc8xxTlbIndex(_extendedSpr.GetValueOrDefault(Mpc8xxDataControlSpr, 0u));
+        var effectivePageNumber = _extendedSpr.GetValueOrDefault(Mpc8xxDataEpnSpr, 0u);
+        var tableWalkControl = _extendedSpr.GetValueOrDefault(Mpc8xxDataTableWalkControlSpr, 0u);
+        _dataTlb[index] = new Mpc8xxTlbEntry(effectivePageNumber, realPageNumber, tableWalkControl);
+    }
+
+    private static int ExtractMpc8xxTlbIndex(uint controlRegisterValue)
+    {
+        return (int)((controlRegisterValue & Mpc8xxTlbIndexMask) >> 8);
+    }
+
+    private uint TranslateInstructionAddress(uint effectiveAddress)
+    {
+        if ((_machineStateRegister & MachineStateInstructionRelocationMask) == 0)
+        {
+            return effectiveAddress;
+        }
+
+        return TranslateAddress(effectiveAddress, _instructionTlb);
+    }
+
+    private uint TranslateDataAddress(uint effectiveAddress)
+    {
+        if ((_machineStateRegister & MachineStateDataRelocationMask) == 0)
+        {
+            return effectiveAddress;
+        }
+
+        return TranslateAddress(effectiveAddress, _dataTlb);
+    }
+
+    private static uint TranslateAddress(uint effectiveAddress, IReadOnlyList<Mpc8xxTlbEntry?> tlb)
+    {
+        for (var index = 0; index < tlb.Count; index++)
+        {
+            var entry = tlb[index];
+
+            if (!entry.HasValue || (entry.Value.EffectivePageNumber & Mpc8xxValidBit) == 0)
+            {
+                continue;
+            }
+
+            var pageSize = DecodeMpc8xxPageSize(entry.Value.RealPageNumber);
+            var pageOffsetMask = pageSize - 1;
+            var pageBaseMask = ~pageOffsetMask;
+
+            if ((effectiveAddress & pageBaseMask) != (entry.Value.EffectivePageNumber & pageBaseMask))
+            {
+                continue;
+            }
+
+            var translatedPageBase = entry.Value.RealPageNumber & pageBaseMask;
+            var translatedOffset = effectiveAddress & pageOffsetMask;
+            return translatedPageBase | translatedOffset;
+        }
+
+        return effectiveAddress;
+    }
+
+    private static uint DecodeMpc8xxPageSize(uint realPageNumber)
+    {
+        var pageSizeCode = realPageNumber & Mpc8xxPageSizeMask;
+
+        if (pageSizeCode == Mpc8xxPageSize8Mb)
+        {
+            return 8u * 1024u * 1024u;
+        }
+
+        if (pageSizeCode == Mpc8xxPageSize512Kb)
+        {
+            return 512u * 1024u;
+        }
+
+        if (pageSizeCode == Mpc8xxPageSize4Kb &&
+            (realPageNumber & Mpc8xxPageSize16KbFlag) != 0)
+        {
+            return 16u * 1024u;
+        }
+
+        return 4u * 1024u;
+    }
+
+    private void InvalidateAllMpc8xxTlbEntries()
+    {
+        Array.Clear(_instructionTlb, 0, _instructionTlb.Length);
+        Array.Clear(_dataTlb, 0, _dataTlb.Length);
+    }
+
+    private uint ReadDataUInt32(IMemoryBus memoryBus, uint effectiveAddress)
+    {
+        return memoryBus.ReadUInt32(TranslateDataAddress(effectiveAddress));
+    }
+
+    private void WriteDataUInt32(IMemoryBus memoryBus, uint effectiveAddress, uint value)
+    {
+        memoryBus.WriteUInt32(TranslateDataAddress(effectiveAddress), value);
+    }
+
+    private byte ReadDataByte(IMemoryBus memoryBus, uint effectiveAddress)
+    {
+        return memoryBus.ReadByte(TranslateDataAddress(effectiveAddress));
+    }
+
+    private void WriteDataByte(IMemoryBus memoryBus, uint effectiveAddress, byte value)
+    {
+        memoryBus.WriteByte(TranslateDataAddress(effectiveAddress), value);
+    }
+
+    private uint ReadDataUInt16(IMemoryBus memoryBus, uint effectiveAddress)
+    {
+        var high = ReadDataByte(memoryBus, effectiveAddress);
+        var low = ReadDataByte(memoryBus, effectiveAddress + 1);
+        return (uint)((high << 8) | low);
+    }
+
+    private void WriteDataUInt16(IMemoryBus memoryBus, uint effectiveAddress, ushort value)
+    {
+        WriteDataByte(memoryBus, effectiveAddress, (byte)(value >> 8));
+        WriteDataByte(memoryBus, effectiveAddress + 1, (byte)value);
     }
 
     private void SetCarryFlag(bool enabled)
@@ -1434,17 +1642,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return mask;
     }
 
-    private static uint ReadUInt16(IMemoryBus memoryBus, uint address)
-    {
-        var high = memoryBus.ReadByte(address);
-        var low = memoryBus.ReadByte(address + 1);
-
-        return (uint)((high << 8) | low);
-    }
-
-    private static void WriteUInt16(IMemoryBus memoryBus, uint address, ushort value)
-    {
-        memoryBus.WriteByte(address, (byte)(value >> 8));
-        memoryBus.WriteByte(address + 1, (byte)value);
-    }
+    private readonly record struct Mpc8xxTlbEntry(
+        uint EffectivePageNumber,
+        uint RealPageNumber,
+        uint TableWalkControl);
 }
