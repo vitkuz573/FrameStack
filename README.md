@@ -59,14 +59,17 @@ Arguments:
   - `--stop-at-pc-hit 0x...=<hit-count>`
   - `--stop-on-svc 0x...`
   - `--stop-on-watch32-change 0x...`
+  - `--stop-on-watch32-change-reg rN:<offset>`
 - optional trace controls:
   - `--watch32 0x...`
+  - `--watch32-reg rN:<offset>`
+  - `--global32 <name>=0x...`
   - `--count-pc 0x...`
   - `--max-hotspots <count>` or `--full-hotspots`
   - `--window 0x...:<before>:<after>`
   - `--progress-every <instructions>`
   - `--report-json /absolute/path/to/report.json`
-  - `--profile c2600-ram-probe`
+  - `--profile cisco-c2600-boot` (aliases: `c2600-ram-probe`, `c2600-boot-probe`)
   - `--checkpoint-file <path>` / `--checkpoint-force-rebuild`
 
 Probe output includes:
@@ -82,7 +85,7 @@ Example (long-run diagnostics with structured report):
 ```bash
 dotnet run --project tools/FrameStack.ImageProbe -- /path/to/cisco.bin 500000000 256 0 \
   --checkpoint-file .tmp/checkpoints/c2600.chk \
-  --profile c2600-ram-probe \
+  --profile cisco-c2600-boot \
   --count-pc 0x816E292C \
   --stop-at-pc-hit 0x816E292C=32 \
   --max-hotspots 0 \
