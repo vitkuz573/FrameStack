@@ -45,6 +45,27 @@ public sealed class PowerPcTracingSupervisorCallHandlerTests
     }
 
     [Fact]
+    public void HandleShouldCaptureLinkRegisterAndCallerProgramCounterInTrace()
+    {
+        var tracing = new PowerPcTracingSupervisorCallHandler(
+            new StaticHandler(new PowerPcSupervisorCallResult(ReturnValue: 0x1234)));
+
+        tracing.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0x2000,
+            ServiceCode: 0x04,
+            Argument0: 1,
+            Argument1: 2,
+            Argument2: 3,
+            Argument3: 4,
+            LinkRegister: 0x3458));
+
+        var entry = Assert.Single(tracing.CallTrace);
+        Assert.Equal(0x3458u, entry.LinkRegister);
+        Assert.Equal(0x3454u, entry.CallerProgramCounter);
+        Assert.Equal(0x1234u, entry.ReturnValue);
+    }
+
+    [Fact]
     public void HandleShouldKeepControlCharactersForReadableConsoleOutput()
     {
         var tracing = new PowerPcTracingSupervisorCallHandler(

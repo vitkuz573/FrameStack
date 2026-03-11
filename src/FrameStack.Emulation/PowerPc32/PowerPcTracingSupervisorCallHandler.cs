@@ -58,6 +58,7 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
                 context.Argument1,
                 context.Argument2,
                 context.Argument3,
+                context.LinkRegister,
                 result.ReturnValue,
                 result.Halt,
                 result.NextProgramCounter));

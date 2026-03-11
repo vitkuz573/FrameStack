@@ -224,7 +224,7 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
-    public void ReadSpecialPurposeRegisterMtwbShouldSelectInstructionOrDataEpnByActiveControlRegister()
+    public void ReadSpecialPurposeRegisterMtwbShouldUseDataEpnEvenWhenInstructionControlIsActive()
     {
         var cpu = new PowerPc32CpuCore();
 
@@ -239,7 +239,7 @@ public sealed class PowerPc32CpuCoreTests
         var instructionDescriptorPointer = cpu.ReadSpecialPurposeRegister(796);
 
         Assert.Equal(0x0345_08F0u, dataDescriptorPointer);
-        Assert.Equal(0x0345_0810u, instructionDescriptorPointer);
+        Assert.Equal(0x0345_08F0u, instructionDescriptorPointer);
     }
 
     [Fact]
@@ -261,6 +261,20 @@ public sealed class PowerPc32CpuCoreTests
         cpu.ExecuteCycle(memory);
 
         Assert.Equal(0x0F63_C400u, cpu.Registers[6]);
+    }
+
+    [Fact]
+    public void ReadSpecialPurposeRegisterMdTwcShouldNotFallbackToMtwbBaseWhenLevelTwoBaseIsZero()
+    {
+        var cpu = new PowerPc32CpuCore();
+
+        cpu.WriteSpecialPurposeRegister(796, 0x0345_0000); // M_TWB base
+        cpu.WriteSpecialPurposeRegister(795, 0x8F12_3000); // MD_EPN
+        cpu.WriteSpecialPurposeRegister(797, 0x0000_0000); // MD_TWC with zero level-two base
+
+        var descriptorPointer = cpu.ReadSpecialPurposeRegister(797);
+
+        Assert.Equal(0x0023_C400u, descriptorPointer);
     }
 
     [Fact]

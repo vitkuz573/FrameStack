@@ -572,9 +572,13 @@ try
             var nextPc = entry.NextProgramCounter.HasValue
                 ? $"0x{entry.NextProgramCounter.Value:X8}"
                 : "-";
+            var callerPc = entry.CallerProgramCounter != 0
+                ? $"0x{entry.CallerProgramCounter:X8}"
+                : "-";
 
             Console.WriteLine(
                 $"  PC=0x{entry.ProgramCounter:X8} SVC=0x{entry.ServiceCode:X8} " +
+                $"LR=0x{entry.LinkRegister:X8} CALLER={callerPc} " +
                 $"A0=0x{entry.Argument0:X8} A1=0x{entry.Argument1:X8} " +
                 $"A2=0x{entry.Argument2:X8} A3=0x{entry.Argument3:X8} " +
                 $"RET=0x{entry.ReturnValue:X8} HALT={entry.Halt} NEXT={nextPc}");
@@ -608,6 +612,7 @@ try
             trackedProgramCounterHits,
             namedGlobals,
             cliOptions.ProfileNames,
+            supervisorTracer?.CallTrace ?? Array.Empty<PowerPcSupervisorCallTraceEntry>(),
             supervisorTracer?.ConsoleOutput ?? string.Empty);
         SaveProbeReport(cliOptions.ReportJsonPath, probeReport);
         Console.WriteLine($"ReportJsonSaved: {cliOptions.ReportJsonPath}");
@@ -2098,6 +2103,7 @@ static ProbeRunReport CreateProbeReport(
     IReadOnlyDictionary<uint, long> trackedProgramCounterHits,
     IReadOnlyDictionary<string, uint> namedGlobals,
     IReadOnlyList<string> profileNames,
+    IReadOnlyList<PowerPcSupervisorCallTraceEntry> supervisorCallTrace,
     string consoleOutput)
 {
     var globalValues = namedGlobals
@@ -2124,6 +2130,21 @@ static ProbeRunReport CreateProbeReport(
             $"0x{entry.Address:X8}",
             $"0x{entry.PreviousValue:X8}",
             $"0x{entry.CurrentValue:X8}"))
+        .ToArray();
+    var supervisorTrace = supervisorCallTrace
+        .Take(128)
+        .Select(entry => new ProbeSupervisorCallTraceReport(
+            $"0x{entry.ProgramCounter:X8}",
+            $"0x{entry.ServiceCode:X8}",
+            $"0x{entry.LinkRegister:X8}",
+            entry.CallerProgramCounter != 0 ? $"0x{entry.CallerProgramCounter:X8}" : null,
+            $"0x{entry.Argument0:X8}",
+            $"0x{entry.Argument1:X8}",
+            $"0x{entry.Argument2:X8}",
+            $"0x{entry.Argument3:X8}",
+            $"0x{entry.ReturnValue:X8}",
+            entry.Halt,
+            entry.NextProgramCounter.HasValue ? $"0x{entry.NextProgramCounter.Value:X8}" : null))
         .ToArray();
 
     return new ProbeRunReport(
@@ -2158,6 +2179,7 @@ static ProbeRunReport CreateProbeReport(
         hotSpots,
         tail,
         watchEvents,
+        supervisorTrace,
         consoleOutput);
 }
 
@@ -2244,6 +2266,7 @@ file sealed record ProbeRunReport(
     IReadOnlyList<ProbeHotSpotReport> HotSpots,
     IReadOnlyList<string> ProgramCounterTail,
     IReadOnlyList<ProbeMemoryWatchEventReport> MemoryWatchEvents,
+    IReadOnlyList<ProbeSupervisorCallTraceReport> SupervisorTrace,
     string ConsoleOutput);
 
 file sealed record ProbeHotSpotReport(
@@ -2255,6 +2278,19 @@ file sealed record ProbeMemoryWatchEventReport(
     string Address,
     string PreviousValue,
     string CurrentValue);
+
+file sealed record ProbeSupervisorCallTraceReport(
+    string ProgramCounter,
+    string ServiceCode,
+    string LinkRegister,
+    string? CallerProgramCounter,
+    string Argument0,
+    string Argument1,
+    string Argument2,
+    string Argument3,
+    string ReturnValue,
+    bool Halt,
+    string? NextProgramCounter);
 
 file static class ProbeReportJson
 {

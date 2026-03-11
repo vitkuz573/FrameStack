@@ -7,6 +7,12 @@ public readonly record struct PowerPcSupervisorCallTraceEntry(
     uint Argument1,
     uint Argument2,
     uint Argument3,
+    uint LinkRegister,
     uint ReturnValue,
     bool Halt,
-    uint? NextProgramCounter);
+    uint? NextProgramCounter)
+{
+    public uint CallerProgramCounter => LinkRegister >= 4
+        ? LinkRegister - 4
+        : 0;
+}

@@ -6,4 +6,10 @@ public readonly record struct PowerPcSupervisorCallContext(
     uint Argument0,
     uint Argument1,
     uint Argument2,
-    uint Argument3);
+    uint Argument3,
+    uint LinkRegister = 0)
+{
+    public uint CallerProgramCounter => LinkRegister >= 4
+        ? LinkRegister - 4
+        : 0;
+}

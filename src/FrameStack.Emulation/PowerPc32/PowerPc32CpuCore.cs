@@ -378,7 +378,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
             _registers[4],
             _registers[5],
             _registers[6],
-            _registers[7]);
+            _registers[7],
+            _registers.Lr);
 
         var result = SupervisorCallHandler.Handle(context);
         _registers[3] = result.ReturnValue;
@@ -1347,7 +1348,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private uint ComputeMpc8xxLevelOneDescriptorPointer()
     {
         var tableBase = _extendedSpr.GetValueOrDefault(Mpc8xxTableWalkBaseSpr, 0u) & Mpc8xxTableBaseMask;
-        var levelOneIndex = ResolveMpc8xxLevelOneIndex(GetMpc8xxActiveEffectivePageNumber());
+        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
+        var levelOneIndex = ResolveMpc8xxLevelOneIndex(effectivePageNumber);
         return tableBase | levelOneIndex;
     }
 
@@ -1358,43 +1360,22 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private uint ComputeMpc8xxLevelTwoDescriptorPointer()
     {
-        var levelTwoTableBaseSpr = _lastMpc8xxControlSpr == Mpc8xxInstructionControlSpr
-            ? Mpc8xxInstructionTableWalkControlSpr
-            : Mpc8xxDataTableWalkControlSpr;
-        var levelTwoTableBase = _extendedSpr.GetValueOrDefault(levelTwoTableBaseSpr, 0u) & Mpc8xxTableBaseMask;
-
-        if (levelTwoTableBase == 0)
-        {
-            levelTwoTableBase = _extendedSpr.GetValueOrDefault(Mpc8xxTableWalkBaseSpr, 0u) & Mpc8xxTableBaseMask;
-        }
-
-        var effectivePageNumber = GetMpc8xxActiveEffectivePageNumber();
+        var levelTwoTableBase = _extendedSpr.GetValueOrDefault(Mpc8xxDataTableWalkControlSpr, 0u) & Mpc8xxTableBaseMask;
+        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
         var levelTwoIndex = (effectivePageNumber >> 10) & Mpc8xxLevelTwoIndexMask;
         return levelTwoTableBase | levelTwoIndex;
     }
 
-    private uint GetMpc8xxActiveEffectivePageNumber()
+    private uint GetMpc8xxTableWalkEffectivePageNumber()
     {
-        if (_lastMpc8xxControlSpr == Mpc8xxInstructionControlSpr &&
-            _extendedSpr.TryGetValue(Mpc8xxInstructionEpnSpr, out var instructionEpn))
-        {
-            return instructionEpn;
-        }
-
-        if (_lastMpc8xxControlSpr == Mpc8xxDataControlSpr &&
-            _extendedSpr.TryGetValue(Mpc8xxDataEpnSpr, out var dataEpn))
+        if (_extendedSpr.TryGetValue(Mpc8xxDataEpnSpr, out var dataEpn))
         {
             return dataEpn;
         }
 
-        if (_extendedSpr.TryGetValue(Mpc8xxInstructionEpnSpr, out instructionEpn))
+        if (_extendedSpr.TryGetValue(Mpc8xxInstructionEpnSpr, out var instructionEpn))
         {
             return instructionEpn;
-        }
-
-        if (_extendedSpr.TryGetValue(Mpc8xxDataEpnSpr, out dataEpn))
-        {
-            return dataEpn;
         }
 
         return 0u;
