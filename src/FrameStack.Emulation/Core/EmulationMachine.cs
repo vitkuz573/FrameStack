@@ -57,7 +57,9 @@ public sealed class EmulationMachine
         int maxHotSpots = 10,
         int tailLength = 0,
         uint? stopAtProgramCounter = null,
+        IReadOnlyDictionary<uint, long>? stopAtProgramCounterHits = null,
         IReadOnlyList<uint>? watchWordAddresses = null,
+        IReadOnlySet<uint>? stopOnWatchWordChangeAddresses = null,
         int maxMemoryWatchEvents = 512)
     {
         if (instructionBudget <= 0)
@@ -88,6 +90,8 @@ public sealed class EmulationMachine
         var tailIndex = 0;
         var tailCount = 0;
         var watchEvents = new List<MemoryWatchTraceEntry>();
+        var stopAtProgramCounterHitReached = false;
+        var stopOnWatchWordChangeReached = false;
         List<MemoryWatchState>? watchStates = null;
 
         if (watchWordAddresses is { Count: > 0 })
@@ -111,7 +115,17 @@ public sealed class EmulationMachine
             }
 
             hitCounter.TryGetValue(pc, out var hits);
-            hitCounter[pc] = hits + 1;
+            var pcHits = hits + 1;
+            hitCounter[pc] = pcHits;
+
+            if (stopAtProgramCounterHits is not null &&
+                stopAtProgramCounterHits.TryGetValue(pc, out var requiredHits) &&
+                requiredHits > 0 &&
+                pcHits >= requiredHits)
+            {
+                stopAtProgramCounterHitReached = true;
+                break;
+            }
 
             if (tailBuffer is not null)
             {
@@ -149,8 +163,20 @@ public sealed class EmulationMachine
                         {
                             break;
                         }
+
+                        if (stopOnWatchWordChangeAddresses is not null &&
+                            stopOnWatchWordChangeAddresses.Contains(state.Address))
+                        {
+                            stopOnWatchWordChangeReached = true;
+                            break;
+                        }
                     }
                 }
+            }
+
+            if (stopOnWatchWordChangeReached)
+            {
+                break;
             }
         }
 
@@ -183,7 +209,13 @@ public sealed class EmulationMachine
             programCounterTail = orderedTail;
         }
 
-        return new ExecutionTraceSummary(summary, hotSpots, programCounterTail, watchEvents);
+        return new ExecutionTraceSummary(
+            summary,
+            hotSpots,
+            programCounterTail,
+            watchEvents,
+            stopAtProgramCounterHitReached,
+            stopOnWatchWordChangeReached);
     }
 
     private readonly record struct MemoryWatchState(

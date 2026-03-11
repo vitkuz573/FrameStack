@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO.Compression;
 using System.Text;
+using System.Diagnostics;
 using FrameStack.Emulation.Core;
 using FrameStack.Emulation.Images;
 using FrameStack.Emulation.Memory;
@@ -21,7 +22,8 @@ if (args.Length == 0)
         "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
         "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
         "[--svc-return <service>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
-        "[--window <address>:<before>:<after>] [--watch32 <address>] [--count-pc <address>]");
+        "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
+        "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>]");
     return 1;
 }
 
@@ -75,6 +77,12 @@ if (cliOptions.StopAtProgramCounter.HasValue)
     Console.WriteLine($"StopAtProgramCounter: 0x{cliOptions.StopAtProgramCounter.Value:X8}");
 }
 
+if (cliOptions.StopAtProgramCounterHits.Count > 0)
+{
+    Console.WriteLine(
+        $"StopAtProgramCounterHits: {string.Join(", ", cliOptions.StopAtProgramCounterHits.OrderBy(pair => pair.Key).Select(pair => $"0x{pair.Key:X8}={pair.Value}"))}");
+}
+
 if (cliOptions.StopOnSupervisorService.HasValue)
 {
     Console.WriteLine($"StopOnSupervisorService: 0x{cliOptions.StopOnSupervisorService.Value:X8}");
@@ -95,6 +103,12 @@ if (cliOptions.WatchWordAddresses.Count > 0)
 {
     Console.WriteLine(
         $"Watch32: {string.Join(", ", cliOptions.WatchWordAddresses.Select(address => $"0x{address:X8}"))}");
+}
+
+if (cliOptions.StopOnWatchWordChangeAddresses.Count > 0)
+{
+    Console.WriteLine(
+        $"StopOnWatch32Change: {string.Join(", ", cliOptions.StopOnWatchWordChangeAddresses.Select(address => $"0x{address:X8}"))}");
 }
 
 if (cliOptions.TrackedProgramCounters.Count > 0)
@@ -241,17 +255,28 @@ try
 
     var remainingBudget = Math.Max(0L, instructionBudget - timelineExecuted);
     var hotSpotCounters = new Dictionary<uint, long>();
+    var activeWatchWordAddresses = cliOptions.WatchWordAddresses
+        .Concat(cliOptions.StopOnWatchWordChangeAddresses)
+        .Distinct()
+        .ToArray();
+    var runStopwatch = Stopwatch.StartNew();
     var traceRun = RunBudgetWithTrace(
         state.Machine,
         remainingBudget,
         cliOptions.ChunkBudget,
         hotSpotCounters,
         cliOptions.StopAtProgramCounter,
+        cliOptions.StopAtProgramCounterHits,
         cliOptions.TailLength,
-        cliOptions.WatchWordAddresses);
+        activeWatchWordAddresses,
+        cliOptions.StopOnWatchWordChangeAddresses);
+    runStopwatch.Stop();
 
     var executedThisRun = timelineExecuted + traceRun.ExecutedInstructions;
     var executedFromBoot = baseExecutedInstructions + executedThisRun;
+    var runInstructionsPerSecond = runStopwatch.Elapsed.TotalSeconds > 0
+        ? executedThisRun / runStopwatch.Elapsed.TotalSeconds
+        : 0;
 
     Console.WriteLine();
     Console.WriteLine("Preflight Run:");
@@ -266,11 +291,24 @@ try
         Console.WriteLine($"StopAtProgramCounterReached: {traceRun.StopPointReached}");
     }
 
+    if (cliOptions.StopAtProgramCounterHits.Count > 0)
+    {
+        Console.WriteLine($"StopAtProgramCounterHitReached: {traceRun.StopAtProgramCounterHitReached}");
+    }
+
     if (cliOptions.StopOnSupervisorService.HasValue)
     {
         Console.WriteLine(
             $"StopOnSupervisorServiceReached: {stopOnSupervisorServiceHandler?.StopReached ?? false}");
     }
+
+    if (cliOptions.StopOnWatchWordChangeAddresses.Count > 0)
+    {
+        Console.WriteLine($"StopOnWatch32ChangeReached: {traceRun.StopOnWatchWordChangeReached}");
+    }
+
+    Console.WriteLine($"RunWallClockSeconds: {runStopwatch.Elapsed.TotalSeconds:F3}");
+    Console.WriteLine($"RunInstructionsPerSecond: {runInstructionsPerSecond:F2}");
 
     Console.WriteLine($"Halted: {state.Machine.Halted}");
     Console.WriteLine($"FinalProgramCounter: 0x{state.Machine.ProgramCounter:X8}");
@@ -532,11 +570,13 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var chunkBudget = DefaultChunkBudget;
     uint? stopAtProgramCounter = null;
     uint? stopOnSupervisorService = null;
+    var stopAtProgramCounterHits = new Dictionary<uint, long>();
     var tailLength = DefaultTailLength;
     var supervisorReturnOverrides = new Dictionary<uint, uint>();
     var memoryWriteOverrides = new Dictionary<uint, uint>();
     var additionalInstructionWindows = new List<InstructionWindowRequest>();
     var watchWordAddresses = new List<uint>();
+    var stopOnWatchWordChangeAddresses = new HashSet<uint>();
     var trackedProgramCounters = new List<uint>();
     var registerOverrideTokens = new List<string>();
 
@@ -595,6 +635,11 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 stopAtProgramCounter = ParseUInt32Flexible(optionValue);
                 break;
+            case "--stop-at-pc-hit":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                var stopAtPcHit = ParseProgramCounterHitStop(optionName, optionValue);
+                stopAtProgramCounterHits[stopAtPcHit.ProgramCounter] = stopAtPcHit.RequiredHits;
+                break;
             case "--stop-on-svc":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 stopOnSupervisorService = ParseUInt32Flexible(optionValue);
@@ -610,6 +655,10 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
             case "--watch32":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 watchWordAddresses.Add(ParseUInt32Flexible(optionValue));
+                break;
+            case "--stop-on-watch32-change":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                stopOnWatchWordChangeAddresses.Add(ParseUInt32Flexible(optionValue));
                 break;
             case "--count-pc":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
@@ -627,12 +676,14 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         checkpointForceRebuild,
         chunkBudget,
         stopAtProgramCounter,
+        stopAtProgramCounterHits,
         stopOnSupervisorService,
         tailLength,
         supervisorReturnOverrides,
         memoryWriteOverrides,
         additionalInstructionWindows,
         watchWordAddresses,
+        stopOnWatchWordChangeAddresses.ToArray(),
         trackedProgramCounters,
         registerOverrideTokens.ToArray());
 }
@@ -695,6 +746,21 @@ static (uint ServiceCode, uint ReturnValue) ParseSupervisorReturnOverride(string
     var returnValue = ParseUInt32Flexible(token[(separator + 1)..]);
 
     return (serviceCode, returnValue);
+}
+
+static (uint ProgramCounter, long RequiredHits) ParseProgramCounterHitStop(string optionName, string token)
+{
+    var separator = token.IndexOf('=');
+
+    if (separator <= 0 || separator == token.Length - 1)
+    {
+        throw new ArgumentException(
+            $"Invalid '{optionName}' value '{token}'. Expected format '<address>=<hit-count>'.");
+    }
+
+    var programCounter = ParseUInt32Flexible(token[..separator]);
+    var requiredHits = ParsePositiveLongOption(optionName, token[(separator + 1)..]);
+    return (programCounter, requiredHits);
 }
 
 static InstructionWindowRequest ParseInstructionWindowRequest(string token)
@@ -865,18 +931,28 @@ static TracedRunResult RunBudgetWithTrace(
     int chunkBudget,
     IDictionary<uint, long> hotSpotCounters,
     uint? stopAtProgramCounter,
+    IReadOnlyDictionary<uint, long> stopAtProgramCounterHits,
     int tailLength,
-    IReadOnlyList<uint> watchWordAddresses)
+    IReadOnlyList<uint> watchWordAddresses,
+    IReadOnlyList<uint> stopOnWatchWordChangeAddresses)
 {
     var executed = 0L;
     var remaining = Math.Max(0, budget);
     var stopPointReached = false;
+    var stopAtProgramCounterHitReached = false;
+    var stopOnWatchWordChangeReached = false;
     var tail = tailLength > 0
         ? new List<uint>(tailLength)
         : null;
     var memoryWatchEvents = watchWordAddresses.Count > 0
         ? new List<MemoryWatchTraceEntry>()
         : null;
+    HashSet<uint>? stopOnWatchWordChangeSet = null;
+
+    if (stopOnWatchWordChangeAddresses.Count > 0)
+    {
+        stopOnWatchWordChangeSet = stopOnWatchWordChangeAddresses.ToHashSet();
+    }
 
     while (remaining > 0 && !machine.Halted)
     {
@@ -890,7 +966,9 @@ static TracedRunResult RunBudgetWithTrace(
                 maxHotSpots: int.MaxValue,
                 tailLength: tailLength,
                 stopAtProgramCounter: stopAtProgramCounter,
+                stopAtProgramCounterHits: stopAtProgramCounterHits,
                 watchWordAddresses: watchWordAddresses,
+                stopOnWatchWordChangeAddresses: stopOnWatchWordChangeSet,
                 maxMemoryWatchEvents: DefaultMaxMemoryWatchEvents);
         }
         catch (Exception exception)
@@ -986,6 +1064,18 @@ static TracedRunResult RunBudgetWithTrace(
             break;
         }
 
+        if (traceSummary.StopAtProgramCounterHitReached)
+        {
+            stopAtProgramCounterHitReached = true;
+            break;
+        }
+
+        if (traceSummary.StopOnWatchWordChangeReached)
+        {
+            stopOnWatchWordChangeReached = true;
+            break;
+        }
+
         if (chunkExecuted == 0)
         {
             break;
@@ -996,7 +1086,9 @@ static TracedRunResult RunBudgetWithTrace(
         executed,
         tail?.ToArray() ?? Array.Empty<uint>(),
         stopPointReached,
+        stopAtProgramCounterHitReached,
         StopOnSupervisorServiceReached: false,
+        stopOnWatchWordChangeReached,
         memoryWatchEvents?.ToArray() ?? Array.Empty<MemoryWatchTraceEntry>());
 }
 
@@ -1575,12 +1667,14 @@ file sealed record ProbeCliOptions(
     bool CheckpointForceRebuild,
     int ChunkBudget,
     uint? StopAtProgramCounter,
+    IReadOnlyDictionary<uint, long> StopAtProgramCounterHits,
     uint? StopOnSupervisorService,
     int TailLength,
     IReadOnlyDictionary<uint, uint> SupervisorReturnOverrides,
     IReadOnlyDictionary<uint, uint> MemoryWriteOverrides,
     IReadOnlyList<InstructionWindowRequest> AdditionalInstructionWindows,
     IReadOnlyList<uint> WatchWordAddresses,
+    IReadOnlyList<uint> StopOnWatchWordChangeAddresses,
     IReadOnlyList<uint> TrackedProgramCounters,
     string[] RegisterOverrideTokens);
 
@@ -1588,7 +1682,9 @@ file sealed record TracedRunResult(
     long ExecutedInstructions,
     IReadOnlyList<uint> ProgramCounterTail,
     bool StopPointReached,
+    bool StopAtProgramCounterHitReached,
     bool StopOnSupervisorServiceReached,
+    bool StopOnWatchWordChangeReached,
     IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents);
 
 file sealed record InstructionWindowRequest(

@@ -54,6 +54,16 @@ Arguments:
 - `memory-mb` (optional, default `256`)
 - `timeline-steps` (optional, default `0`)
 - `register=value` overrides (optional, PowerPC only): `r0..r31`, `lr`, `ctr`, `cr`, `xer`, `pc`
+- optional stop controls:
+  - `--stop-at-pc 0x...`
+  - `--stop-at-pc-hit 0x...=<hit-count>`
+  - `--stop-on-svc 0x...`
+  - `--stop-on-watch32-change 0x...`
+- optional trace controls:
+  - `--watch32 0x...`
+  - `--count-pc 0x...`
+  - `--window 0x...:<before>:<after>`
+  - `--checkpoint-file <path>` / `--checkpoint-force-rebuild`
 
 Probe output includes:
 
