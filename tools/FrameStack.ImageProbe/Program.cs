@@ -308,6 +308,7 @@ try
         powerPcCore.SupervisorCallHandler = activeSupervisorHandler;
     }
 
+    var supervisorCallCountersBaseline = SnapshotSupervisorCallCounters(powerPcCore);
     var timelineExecuted = 0L;
 
     if (timelineSteps > 0)
@@ -394,6 +395,10 @@ try
     var runInstructionsPerSecond = runStopwatch.Elapsed.TotalSeconds > 0
         ? executedThisRun / runStopwatch.Elapsed.TotalSeconds
         : 0;
+    var supervisorCallCountersTotal = SnapshotSupervisorCallCounters(powerPcCore);
+    var supervisorCallCountersDelta = ComputeCounterDelta(
+        supervisorCallCountersBaseline,
+        supervisorCallCountersTotal);
 
     Console.WriteLine();
     Console.WriteLine("Preflight Run:");
@@ -595,19 +600,8 @@ try
         }
     }
 
-    if (powerPcCore is not null &&
-        powerPcCore.SupervisorCallCounters.Count > 0)
-    {
-        Console.WriteLine("SupervisorCalls:");
-
-        foreach (var (serviceCode, hits) in powerPcCore.SupervisorCallCounters
-                     .OrderByDescending(entry => entry.Value)
-                     .ThenBy(entry => entry.Key)
-                     .Take(12))
-        {
-            Console.WriteLine($"  Service=0x{serviceCode:X8} Hits={hits}");
-        }
-    }
+    PrintSupervisorCallCounters("SupervisorCallsDelta", supervisorCallCountersDelta);
+    PrintSupervisorCallCounters("SupervisorCallsTotal", supervisorCallCountersTotal);
 
     if (supervisorTracer is not null &&
         supervisorTracer.SubserviceCounters.Count > 0)
@@ -675,6 +669,8 @@ try
             trackedProgramCounterHits,
             namedGlobals,
             cliOptions.ProfileNames,
+            supervisorCallCountersTotal,
+            supervisorCallCountersDelta,
             supervisorTracer?.CallTrace ?? Array.Empty<PowerPcSupervisorCallTraceEntry>(),
             supervisorTracer?.ConsoleOutput ?? string.Empty);
         SaveProbeReport(cliOptions.ReportJsonPath, probeReport);
@@ -1507,8 +1503,10 @@ static TracedRunResult RunBudgetWithTrace(
         : null;
     var memoryWatchEvents = staticWatchWordAddresses.Count > 0 ||
                             dynamicWatchWordRequests.Count > 0 ||
+                            effectiveWatchWordAddresses.Count > 0 ||
                             stopOnWatchWordChangeAddresses.Count > 0 ||
-                            dynamicStopOnWatchWordChangeRequests.Count > 0
+                            dynamicStopOnWatchWordChangeRequests.Count > 0 ||
+                            stopOnWatchWordChangeEffectiveAddresses.Count > 0
         ? new List<MemoryWatchTraceEntry>()
         : null;
     HashSet<uint>? trackedProgramCounterSet = null;
@@ -3003,6 +3001,63 @@ static void MergeMemoryWatchEvents(
     }
 }
 
+static IReadOnlyDictionary<uint, long> SnapshotSupervisorCallCounters(
+    PowerPc32CpuCore? powerPcCore)
+{
+    if (powerPcCore is null || powerPcCore.SupervisorCallCounters.Count == 0)
+    {
+        return new Dictionary<uint, long>(0);
+    }
+
+    return powerPcCore.SupervisorCallCounters
+        .ToDictionary(entry => entry.Key, entry => entry.Value);
+}
+
+static IReadOnlyDictionary<uint, long> ComputeCounterDelta(
+    IReadOnlyDictionary<uint, long> baseline,
+    IReadOnlyDictionary<uint, long> current)
+{
+    if (current.Count == 0)
+    {
+        return new Dictionary<uint, long>(0);
+    }
+
+    var delta = new Dictionary<uint, long>();
+
+    foreach (var (serviceCode, currentHits) in current)
+    {
+        baseline.TryGetValue(serviceCode, out var baselineHits);
+        var runHits = currentHits - baselineHits;
+
+        if (runHits > 0)
+        {
+            delta[serviceCode] = runHits;
+        }
+    }
+
+    return delta;
+}
+
+static void PrintSupervisorCallCounters(
+    string label,
+    IReadOnlyDictionary<uint, long> counters)
+{
+    if (counters.Count == 0)
+    {
+        return;
+    }
+
+    Console.WriteLine($"{label}:");
+
+    foreach (var (serviceCode, hits) in counters
+                 .OrderByDescending(entry => entry.Value)
+                 .ThenBy(entry => entry.Key)
+                 .Take(12))
+    {
+        Console.WriteLine($"  Service=0x{serviceCode:X8} Hits={hits}");
+    }
+}
+
 static ProbeRunReport CreateProbeReport(
     string imagePath,
     int imageSizeBytes,
@@ -3021,6 +3076,8 @@ static ProbeRunReport CreateProbeReport(
     IReadOnlyDictionary<uint, long> trackedProgramCounterHits,
     IReadOnlyDictionary<string, uint> namedGlobals,
     IReadOnlyList<string> profileNames,
+    IReadOnlyDictionary<uint, long> supervisorCallCountersTotal,
+    IReadOnlyDictionary<uint, long> supervisorCallCountersDelta,
     IReadOnlyList<PowerPcSupervisorCallTraceEntry> supervisorCallTrace,
     string consoleOutput)
 {
@@ -3064,6 +3121,18 @@ static ProbeRunReport CreateProbeReport(
             entry.Halt,
             entry.NextProgramCounter.HasValue ? $"0x{entry.NextProgramCounter.Value:X8}" : null))
         .ToArray();
+    var supervisorCallsTotal = supervisorCallCountersTotal
+        .OrderBy(entry => entry.Key)
+        .ToDictionary(
+            entry => $"0x{entry.Key:X8}",
+            entry => entry.Value,
+            StringComparer.Ordinal);
+    var supervisorCallsDelta = supervisorCallCountersDelta
+        .OrderBy(entry => entry.Key)
+        .ToDictionary(
+            entry => $"0x{entry.Key:X8}",
+            entry => entry.Value,
+            StringComparer.Ordinal);
 
     return new ProbeRunReport(
         DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
@@ -3097,6 +3166,8 @@ static ProbeRunReport CreateProbeReport(
         hotSpots,
         tail,
         watchEvents,
+        supervisorCallsTotal,
+        supervisorCallsDelta,
         supervisorTrace,
         consoleOutput);
 }
@@ -3190,6 +3261,8 @@ file sealed record ProbeRunReport(
     IReadOnlyList<ProbeHotSpotReport> HotSpots,
     IReadOnlyList<string> ProgramCounterTail,
     IReadOnlyList<ProbeMemoryWatchEventReport> MemoryWatchEvents,
+    IReadOnlyDictionary<string, long> SupervisorCallsTotal,
+    IReadOnlyDictionary<string, long> SupervisorCallsDelta,
     IReadOnlyList<ProbeSupervisorCallTraceReport> SupervisorTrace,
     string ConsoleOutput);
 

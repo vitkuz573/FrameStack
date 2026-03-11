@@ -6,6 +6,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 {
     private const int LinkRegisterSpr = 8;
     private const int CounterRegisterSpr = 9;
+    private const int DecrementerRegisterSpr = 22;
     private const int Mpc8xxInstructionControlSpr = 784;
     private const int Mpc8xxInstructionEpnSpr = 787;
     private const int Mpc8xxInstructionTableWalkControlSpr = 789;
@@ -237,6 +238,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         // PowerPC time-base advances independently from mftb reads.
         _timeBaseCounter++;
+        TickDecrementer();
 
         pc = _registers.Pc;
         var instructionWord = memoryBus.ReadUInt32(TranslateInstructionAddress(pc));
@@ -1359,6 +1361,17 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         _registers[instruction.Rt] = value;
         _registers.Pc += 4;
+    }
+
+    private void TickDecrementer()
+    {
+        if (!_extendedSpr.TryGetValue(DecrementerRegisterSpr, out var decrementerValue))
+        {
+            return;
+        }
+
+        // DEC decrements continuously and wraps on underflow.
+        _extendedSpr[DecrementerRegisterSpr] = unchecked(decrementerValue - 1);
     }
 
     private void ExecuteLoadStringWordImmediate(IMemoryBus memoryBus, PowerPcInstruction instruction)
