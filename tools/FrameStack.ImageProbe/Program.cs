@@ -8,6 +8,7 @@ using FrameStack.Emulation.Runtime;
 
 const int DefaultChunkBudget = 200_000_000;
 const int DefaultTailLength = 64;
+const int DefaultMaxMemoryWatchEvents = 1024;
 const long DefaultCheckpointAtInstructions = 2_200_000_000;
 const uint CheckpointMagic = 0x4653_5043; // "FSPC"
 const int CheckpointVersion = 1;
@@ -19,7 +20,7 @@ if (args.Length == 0)
         "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
         "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
         "[--svc-return <service>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--tail-length <count>] [--save-checkpoint <path>] " +
-        "[--window <address>:<before>:<after>]");
+        "[--window <address>:<before>:<after>] [--watch32 <address>]");
     return 1;
 }
 
@@ -82,6 +83,12 @@ if (cliOptions.AdditionalInstructionWindows.Count > 0)
 {
     Console.WriteLine(
         $"AdditionalWindows: {string.Join(", ", cliOptions.AdditionalInstructionWindows.Select(window => $"0x{window.Address:X8}:{window.Before}:{window.After}"))}");
+}
+
+if (cliOptions.WatchWordAddresses.Count > 0)
+{
+    Console.WriteLine(
+        $"Watch32: {string.Join(", ", cliOptions.WatchWordAddresses.Select(address => $"0x{address:X8}"))}");
 }
 
 if (cliOptions.CheckpointFilePath is not null)
@@ -220,7 +227,8 @@ try
         cliOptions.ChunkBudget,
         hotSpotCounters,
         cliOptions.StopAtProgramCounter,
-        cliOptions.TailLength);
+        cliOptions.TailLength,
+        cliOptions.WatchWordAddresses);
 
     var executedThisRun = timelineExecuted + traceRun.ExecutedInstructions;
     var executedFromBoot = baseExecutedInstructions + executedThisRun;
@@ -255,6 +263,18 @@ try
 
             Console.WriteLine(
                 $"  PC=0x{pc:X8} INSN=0x{instructionWord:X8} SRC={source} {DescribeInstruction(pc, instructionWord)}");
+        }
+    }
+
+    if (traceRun.MemoryWatchEvents.Count > 0)
+    {
+        Console.WriteLine("MemoryWatchEvents:");
+
+        foreach (var watchEvent in traceRun.MemoryWatchEvents)
+        {
+            Console.WriteLine(
+                $"  PC=0x{watchEvent.ProgramCounter:X8} ADDR=0x{watchEvent.Address:X8} " +
+                $"OLD=0x{watchEvent.PreviousValue:X8} NEW=0x{watchEvent.CurrentValue:X8}");
         }
     }
 
@@ -469,6 +489,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var supervisorReturnOverrides = new Dictionary<uint, uint>();
     var memoryWriteOverrides = new Dictionary<uint, uint>();
     var additionalInstructionWindows = new List<InstructionWindowRequest>();
+    var watchWordAddresses = new List<uint>();
     var registerOverrideTokens = new List<string>();
 
     for (var index = 0; index < tokens.Length; index++)
@@ -534,6 +555,10 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 additionalInstructionWindows.Add(ParseInstructionWindowRequest(optionValue));
                 break;
+            case "--watch32":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                watchWordAddresses.Add(ParseUInt32Flexible(optionValue));
+                break;
             default:
                 throw new ArgumentException($"Unsupported option '{optionName}'.");
         }
@@ -550,6 +575,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         supervisorReturnOverrides,
         memoryWriteOverrides,
         additionalInstructionWindows,
+        watchWordAddresses,
         registerOverrideTokens.ToArray());
 }
 
@@ -766,13 +792,17 @@ static TracedRunResult RunBudgetWithTrace(
     int chunkBudget,
     IDictionary<uint, long> hotSpotCounters,
     uint? stopAtProgramCounter,
-    int tailLength)
+    int tailLength,
+    IReadOnlyList<uint> watchWordAddresses)
 {
     var executed = 0L;
     var remaining = Math.Max(0, budget);
     var stopPointReached = false;
     var tail = tailLength > 0
         ? new List<uint>(tailLength)
+        : null;
+    var memoryWatchEvents = watchWordAddresses.Count > 0
+        ? new List<MemoryWatchTraceEntry>()
         : null;
 
     while (remaining > 0 && !machine.Halted)
@@ -782,13 +812,16 @@ static TracedRunResult RunBudgetWithTrace(
             currentChunk,
             maxHotSpots: int.MaxValue,
             tailLength: tailLength,
-            stopAtProgramCounter: stopAtProgramCounter);
+            stopAtProgramCounter: stopAtProgramCounter,
+            watchWordAddresses: watchWordAddresses,
+            maxMemoryWatchEvents: DefaultMaxMemoryWatchEvents);
         var chunkExecuted = traceSummary.Summary.ExecutedInstructions;
 
         executed += chunkExecuted;
         remaining -= chunkExecuted;
         MergeHotSpots(hotSpotCounters, traceSummary.HotSpots);
         MergeProgramCounterTail(tail, traceSummary.ProgramCounterTail, tailLength);
+        MergeMemoryWatchEvents(memoryWatchEvents, traceSummary.MemoryWatchEvents, DefaultMaxMemoryWatchEvents);
 
         if (stopAtProgramCounter.HasValue &&
             machine.ProgramCounter == stopAtProgramCounter.Value)
@@ -806,7 +839,8 @@ static TracedRunResult RunBudgetWithTrace(
     return new TracedRunResult(
         executed,
         tail?.ToArray() ?? Array.Empty<uint>(),
-        stopPointReached);
+        stopPointReached,
+        memoryWatchEvents?.ToArray() ?? Array.Empty<MemoryWatchTraceEntry>());
 }
 
 static ProbeCheckpoint CreateCheckpoint(
@@ -1288,6 +1322,27 @@ static void MergeProgramCounterTail(
     }
 }
 
+static void MergeMemoryWatchEvents(
+    IList<MemoryWatchTraceEntry>? destination,
+    IReadOnlyList<MemoryWatchTraceEntry> source,
+    int maxLength)
+{
+    if (destination is null || maxLength <= 0 || source.Count == 0)
+    {
+        return;
+    }
+
+    foreach (var watchEvent in source)
+    {
+        if (destination.Count >= maxLength)
+        {
+            break;
+        }
+
+        destination.Add(watchEvent);
+    }
+}
+
 file sealed record ProbeCliOptions(
     string? CheckpointFilePath,
     string? SaveCheckpointFilePath,
@@ -1299,12 +1354,14 @@ file sealed record ProbeCliOptions(
     IReadOnlyDictionary<uint, uint> SupervisorReturnOverrides,
     IReadOnlyDictionary<uint, uint> MemoryWriteOverrides,
     IReadOnlyList<InstructionWindowRequest> AdditionalInstructionWindows,
+    IReadOnlyList<uint> WatchWordAddresses,
     string[] RegisterOverrideTokens);
 
 file sealed record TracedRunResult(
     long ExecutedInstructions,
     IReadOnlyList<uint> ProgramCounterTail,
-    bool StopPointReached);
+    bool StopPointReached,
+    IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents);
 
 file sealed record InstructionWindowRequest(
     uint Address,

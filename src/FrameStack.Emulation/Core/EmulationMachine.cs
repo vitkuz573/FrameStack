@@ -56,7 +56,9 @@ public sealed class EmulationMachine
         int instructionBudget,
         int maxHotSpots = 10,
         int tailLength = 0,
-        uint? stopAtProgramCounter = null)
+        uint? stopAtProgramCounter = null,
+        IReadOnlyList<uint>? watchWordAddresses = null,
+        int maxMemoryWatchEvents = 512)
     {
         if (instructionBudget <= 0)
         {
@@ -73,11 +75,30 @@ public sealed class EmulationMachine
             throw new ArgumentOutOfRangeException(nameof(tailLength), "Tail length cannot be negative.");
         }
 
+        if (maxMemoryWatchEvents < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxMemoryWatchEvents),
+                "Max memory watch events cannot be negative.");
+        }
+
         var hitCounter = new Dictionary<uint, int>();
         var executedThisRun = 0;
         var tailBuffer = tailLength > 0 ? new uint[tailLength] : null;
         var tailIndex = 0;
         var tailCount = 0;
+        var watchEvents = new List<MemoryWatchTraceEntry>();
+        List<MemoryWatchState>? watchStates = null;
+
+        if (watchWordAddresses is { Count: > 0 })
+        {
+            watchStates = new List<MemoryWatchState>(watchWordAddresses.Count);
+
+            foreach (var address in watchWordAddresses)
+            {
+                watchStates.Add(new MemoryWatchState(address, _memoryBus.ReadUInt32(address)));
+            }
+        }
 
         while (!_cpu.Halted && executedThisRun < instructionBudget)
         {
@@ -106,6 +127,31 @@ public sealed class EmulationMachine
             _cpu.ExecuteCycle(_memoryBus);
             executedThisRun++;
             ExecutedInstructions++;
+
+            if (watchStates is not null && watchEvents.Count < maxMemoryWatchEvents)
+            {
+                for (var index = 0; index < watchStates.Count; index++)
+                {
+                    var state = watchStates[index];
+                    var currentValue = _memoryBus.ReadUInt32(state.Address);
+
+                    if (currentValue != state.LastValue)
+                    {
+                        watchEvents.Add(new MemoryWatchTraceEntry(
+                            pc,
+                            state.Address,
+                            state.LastValue,
+                            currentValue));
+
+                        watchStates[index] = state with { LastValue = currentValue };
+
+                        if (watchEvents.Count >= maxMemoryWatchEvents)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         var summary = new ExecutionSummary(
@@ -137,8 +183,12 @@ public sealed class EmulationMachine
             programCounterTail = orderedTail;
         }
 
-        return new ExecutionTraceSummary(summary, hotSpots, programCounterTail);
+        return new ExecutionTraceSummary(summary, hotSpots, programCounterTail, watchEvents);
     }
+
+    private readonly record struct MemoryWatchState(
+        uint Address,
+        uint LastValue);
 
     public byte ReadByte(uint address)
     {
