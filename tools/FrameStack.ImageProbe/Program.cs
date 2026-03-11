@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Text;
 using System.Diagnostics;
+using System.Text.Json;
 using FrameStack.Emulation.Core;
 using FrameStack.Emulation.Images;
 using FrameStack.Emulation.Memory;
@@ -10,6 +11,7 @@ using FrameStack.Emulation.Runtime;
 
 const int DefaultChunkBudget = 200_000_000;
 const int DefaultTailLength = 64;
+const int DefaultMaxHotSpots = 4096;
 const int DefaultMaxMemoryWatchEvents = 1024;
 const long DefaultCheckpointAtInstructions = 2_200_000_000;
 const uint CheckpointMagic = 0x4653_5043; // "FSPC"
@@ -23,7 +25,8 @@ if (args.Length == 0)
         "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
         "[--svc-return <service>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
-        "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>]");
+        "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>] [--max-hotspots <count>] [--full-hotspots] " +
+        "[--progress-every <instructions>] [--report-json <path>] [--profile <name>]");
     return 1;
 }
 
@@ -117,6 +120,19 @@ if (cliOptions.TrackedProgramCounters.Count > 0)
         $"CountPc: {string.Join(", ", cliOptions.TrackedProgramCounters.Select(address => $"0x{address:X8}"))}");
 }
 
+if (cliOptions.ProfileNames.Count > 0)
+{
+    Console.WriteLine($"Profiles: {string.Join(", ", cliOptions.ProfileNames)}");
+}
+
+Console.WriteLine(
+    $"MaxHotSpots: {(cliOptions.MaxHotSpots == int.MaxValue ? "full" : cliOptions.MaxHotSpots.ToString(CultureInfo.InvariantCulture))}");
+
+if (cliOptions.ProgressEveryInstructions > 0)
+{
+    Console.WriteLine($"ProgressEveryInstructions: {cliOptions.ProgressEveryInstructions}");
+}
+
 if (cliOptions.CheckpointFilePath is not null)
 {
     Console.WriteLine($"CheckpointFile: {cliOptions.CheckpointFilePath}");
@@ -125,6 +141,11 @@ if (cliOptions.CheckpointFilePath is not null)
 if (cliOptions.SaveCheckpointFilePath is not null)
 {
     Console.WriteLine($"SaveCheckpointFile: {cliOptions.SaveCheckpointFilePath}");
+}
+
+if (cliOptions.ReportJsonPath is not null)
+{
+    Console.WriteLine($"ReportJson: {cliOptions.ReportJsonPath}");
 }
 
 if (TryMapVirtualAddressToFileOffset(inspection.Sections, inspection.EntryPoint, out var entryOffset))
@@ -255,6 +276,9 @@ try
 
     var remainingBudget = Math.Max(0L, instructionBudget - timelineExecuted);
     var hotSpotCounters = new Dictionary<uint, long>();
+    var trackedProgramCounterHits = cliOptions.TrackedProgramCounters
+        .Distinct()
+        .ToDictionary(address => address, _ => 0L);
     var activeWatchWordAddresses = cliOptions.WatchWordAddresses
         .Concat(cliOptions.StopOnWatchWordChangeAddresses)
         .Distinct()
@@ -265,11 +289,26 @@ try
         remainingBudget,
         cliOptions.ChunkBudget,
         hotSpotCounters,
+        trackedProgramCounterHits,
+        cliOptions.MaxHotSpots,
         cliOptions.StopAtProgramCounter,
         cliOptions.StopAtProgramCounterHits,
         cliOptions.TailLength,
         activeWatchWordAddresses,
-        cliOptions.StopOnWatchWordChangeAddresses);
+        cliOptions.StopOnWatchWordChangeAddresses,
+        cliOptions.ProgressEveryInstructions,
+        progress =>
+        {
+            var progressExecutedThisRun = timelineExecuted + progress.ExecutedInstructions;
+            var progressExecutedFromBoot = baseExecutedInstructions + progressExecutedThisRun;
+            Console.WriteLine(
+                $"Progress: Executed={progressExecutedThisRun} " +
+                $"FromBoot={progressExecutedFromBoot} " +
+                $"Remaining={progress.RemainingInstructions} " +
+                $"PC=0x{progress.ProgramCounter:X8} " +
+                $"IPS={progress.InstructionsPerSecond:F2} " +
+                $"LastChunkStop={progress.LastChunkStopReason}");
+        });
     runStopwatch.Stop();
 
     var executedThisRun = timelineExecuted + traceRun.ExecutedInstructions;
@@ -286,25 +325,31 @@ try
         Console.WriteLine($"ExecutedInstructionsFromBoot: {executedFromBoot}");
     }
 
+    Console.WriteLine($"StopReason: {traceRun.StopReason}");
+
     if (cliOptions.StopAtProgramCounter.HasValue)
     {
-        Console.WriteLine($"StopAtProgramCounterReached: {traceRun.StopPointReached}");
+        Console.WriteLine(
+            $"StopAtProgramCounterReached: {traceRun.StopReason == ExecutionStopReason.StopAtProgramCounter}");
     }
 
     if (cliOptions.StopAtProgramCounterHits.Count > 0)
     {
-        Console.WriteLine($"StopAtProgramCounterHitReached: {traceRun.StopAtProgramCounterHitReached}");
+        Console.WriteLine(
+            $"StopAtProgramCounterHitReached: {traceRun.StopReason == ExecutionStopReason.StopAtProgramCounterHit}");
     }
+
+    var stopOnSupervisorServiceReached = stopOnSupervisorServiceHandler?.StopReached ?? false;
 
     if (cliOptions.StopOnSupervisorService.HasValue)
     {
-        Console.WriteLine(
-            $"StopOnSupervisorServiceReached: {stopOnSupervisorServiceHandler?.StopReached ?? false}");
+        Console.WriteLine($"StopOnSupervisorServiceReached: {stopOnSupervisorServiceReached}");
     }
 
     if (cliOptions.StopOnWatchWordChangeAddresses.Count > 0)
     {
-        Console.WriteLine($"StopOnWatch32ChangeReached: {traceRun.StopOnWatchWordChangeReached}");
+        Console.WriteLine(
+            $"StopOnWatch32ChangeReached: {traceRun.StopReason == ExecutionStopReason.StopOnWatchWordChange}");
     }
 
     Console.WriteLine($"RunWallClockSeconds: {runStopwatch.Elapsed.TotalSeconds:F3}");
@@ -351,7 +396,8 @@ try
         PrintSpecialPurposeRegisters(powerPcCore);
     }
 
-    PrintFirmwareGlobals(state.Machine);
+    var firmwareGlobals = ReadFirmwareGlobals(state.Machine);
+    PrintFirmwareGlobals(firmwareGlobals);
     PrintDynamicWatch(state.Machine, powerPcCore);
     Console.WriteLine("HotSpots:");
 
@@ -360,6 +406,15 @@ try
         .ThenBy(entry => entry.Key)
         .Take(12)
         .ToArray();
+
+    if (cliOptions.MaxHotSpots <= 0)
+    {
+        Console.WriteLine("  <disabled>");
+    }
+    else if (topHotSpots.Length == 0)
+    {
+        Console.WriteLine("  <empty>");
+    }
 
     foreach (var hotSpot in topHotSpots)
     {
@@ -378,7 +433,7 @@ try
 
         foreach (var trackedPc in cliOptions.TrackedProgramCounters.Distinct().OrderBy(address => address))
         {
-            hotSpotCounters.TryGetValue(trackedPc, out var hits);
+            trackedProgramCounterHits.TryGetValue(trackedPc, out var hits);
             var (instructionWord, hasImageWord, imageWord) =
                 ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, trackedPc);
             var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
@@ -506,6 +561,31 @@ try
         Console.WriteLine(supervisorTracer.ConsoleOutput);
     }
 
+    if (cliOptions.ReportJsonPath is not null)
+    {
+        var probeReport = CreateProbeReport(
+            imagePath,
+            imageBytes.Length,
+            inspection,
+            instructionBudget,
+            memoryMb,
+            baseExecutedInstructions,
+            executedThisRun,
+            executedFromBoot,
+            runStopwatch.Elapsed.TotalSeconds,
+            runInstructionsPerSecond,
+            state,
+            traceRun,
+            stopOnSupervisorServiceReached,
+            topHotSpots,
+            trackedProgramCounterHits,
+            firmwareGlobals,
+            cliOptions.ProfileNames,
+            supervisorTracer?.ConsoleOutput ?? string.Empty);
+        SaveProbeReport(cliOptions.ReportJsonPath, probeReport);
+        Console.WriteLine($"ReportJsonSaved: {cliOptions.ReportJsonPath}");
+    }
+
     if (cliOptions.SaveCheckpointFilePath is not null)
     {
         var finalCheckpoint = CreateCheckpoint(state, executedFromBoot, memoryMb);
@@ -565,9 +645,12 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
 {
     string? checkpointFilePath = null;
     string? saveCheckpointFilePath = null;
+    string? reportJsonPath = null;
     long? checkpointAtInstructions = null;
     var checkpointForceRebuild = false;
     var chunkBudget = DefaultChunkBudget;
+    var maxHotSpots = DefaultMaxHotSpots;
+    var progressEveryInstructions = 0L;
     uint? stopAtProgramCounter = null;
     uint? stopOnSupervisorService = null;
     var stopAtProgramCounterHits = new Dictionary<uint, long>();
@@ -578,6 +661,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var watchWordAddresses = new List<uint>();
     var stopOnWatchWordChangeAddresses = new HashSet<uint>();
     var trackedProgramCounters = new List<uint>();
+    var profileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var registerOverrideTokens = new List<string>();
 
     for (var index = 0; index < tokens.Length; index++)
@@ -620,6 +704,25 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
             case "--chunk-budget":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 chunkBudget = ParsePositiveIntOption(optionName, optionValue);
+                break;
+            case "--max-hotspots":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                maxHotSpots = ParseNonNegativeIntOption(optionName, optionValue);
+                break;
+            case "--full-hotspots":
+                maxHotSpots = int.MaxValue;
+                break;
+            case "--progress-every":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                progressEveryInstructions = ParsePositiveLongOption(optionName, optionValue);
+                break;
+            case "--report-json":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                reportJsonPath = Path.GetFullPath(optionValue);
+                break;
+            case "--profile":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                profileNames.Add(optionValue.Trim());
                 break;
             case "--svc-return":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
@@ -669,12 +772,21 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         }
     }
 
+    ApplyProbeProfiles(
+        profileNames,
+        additionalInstructionWindows,
+        watchWordAddresses,
+        trackedProgramCounters);
+
     return new ProbeCliOptions(
         checkpointFilePath,
         saveCheckpointFilePath,
+        reportJsonPath,
         checkpointAtInstructions,
         checkpointForceRebuild,
         chunkBudget,
+        maxHotSpots,
+        progressEveryInstructions,
         stopAtProgramCounter,
         stopAtProgramCounterHits,
         stopOnSupervisorService,
@@ -685,7 +797,83 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         watchWordAddresses,
         stopOnWatchWordChangeAddresses.ToArray(),
         trackedProgramCounters,
+        profileNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray(),
         registerOverrideTokens.ToArray());
+}
+
+static void ApplyProbeProfiles(
+    IReadOnlySet<string> profileNames,
+    IList<InstructionWindowRequest> additionalInstructionWindows,
+    IList<uint> watchWordAddresses,
+    IList<uint> trackedProgramCounters)
+{
+    foreach (var profileNameRaw in profileNames)
+    {
+        var profileName = profileNameRaw.Trim();
+
+        if (profileName.Equals("c2600-ram-probe", StringComparison.OrdinalIgnoreCase) ||
+            profileName.Equals("c2600-boot-probe", StringComparison.OrdinalIgnoreCase))
+        {
+            const uint baseGlobal = 0x82F40774;
+
+            for (var index = 0; index <= 11; index++)
+            {
+                AddDistinct(watchWordAddresses, unchecked(baseGlobal + (uint)(index * 4)));
+            }
+
+            var descriptorWatchAddresses = new uint[]
+            {
+                0x82F406A8,
+                0x82F406AC,
+                0x82F406B0,
+                0x82F406B4,
+                0x82F406B8,
+                0x82F406BC,
+                0x82F406C0,
+                0x82F406C4,
+                0x82F406C8,
+                0x82F406CC,
+            };
+
+            foreach (var address in descriptorWatchAddresses)
+            {
+                AddDistinct(watchWordAddresses, address);
+            }
+
+            var trackedPcs = new uint[]
+            {
+                0x816E2928,
+                0x816E292C,
+                0x816E29BC,
+                0x816E2DD4,
+                0x816E2F70,
+            };
+
+            foreach (var trackedPc in trackedPcs)
+            {
+                AddDistinct(trackedProgramCounters, trackedPc);
+            }
+
+            AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2928, 12, 12));
+            AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E29BC, 8, 8));
+            AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2DD4, 8, 8));
+            continue;
+        }
+
+        throw new ArgumentException(
+            $"Unsupported profile '{profileNameRaw}'. Supported profiles: c2600-ram-probe.");
+    }
+
+}
+
+static void AddDistinct<T>(ICollection<T> destination, T value)
+{
+    if (destination.Contains(value))
+    {
+        return;
+    }
+
+    destination.Add(value);
 }
 
 static string ReadRequiredOptionValue(string[] tokens, ref int index, string optionName)
@@ -930,17 +1118,19 @@ static TracedRunResult RunBudgetWithTrace(
     long budget,
     int chunkBudget,
     IDictionary<uint, long> hotSpotCounters,
+    IDictionary<uint, long> trackedProgramCounterHits,
+    int maxHotSpots,
     uint? stopAtProgramCounter,
     IReadOnlyDictionary<uint, long> stopAtProgramCounterHits,
     int tailLength,
     IReadOnlyList<uint> watchWordAddresses,
-    IReadOnlyList<uint> stopOnWatchWordChangeAddresses)
+    IReadOnlyList<uint> stopOnWatchWordChangeAddresses,
+    long progressEveryInstructions,
+    Action<TraceProgress>? progressCallback)
 {
     var executed = 0L;
     var remaining = Math.Max(0, budget);
-    var stopPointReached = false;
-    var stopAtProgramCounterHitReached = false;
-    var stopOnWatchWordChangeReached = false;
+    var stopReason = ExecutionStopReason.None;
     var tail = tailLength > 0
         ? new List<uint>(tailLength)
         : null;
@@ -948,10 +1138,20 @@ static TracedRunResult RunBudgetWithTrace(
         ? new List<MemoryWatchTraceEntry>()
         : null;
     HashSet<uint>? stopOnWatchWordChangeSet = null;
+    HashSet<uint>? trackedProgramCounterSet = null;
+    var runStopwatch = Stopwatch.StartNew();
+    var nextProgressCheckpoint = progressEveryInstructions > 0
+        ? progressEveryInstructions
+        : long.MaxValue;
 
     if (stopOnWatchWordChangeAddresses.Count > 0)
     {
         stopOnWatchWordChangeSet = stopOnWatchWordChangeAddresses.ToHashSet();
+    }
+
+    if (trackedProgramCounterHits.Count > 0)
+    {
+        trackedProgramCounterSet = trackedProgramCounterHits.Keys.ToHashSet();
     }
 
     while (remaining > 0 && !machine.Halted)
@@ -963,10 +1163,11 @@ static TracedRunResult RunBudgetWithTrace(
         {
             traceSummary = machine.RunWithTrace(
                 currentChunk,
-                maxHotSpots: int.MaxValue,
+                maxHotSpots: maxHotSpots,
                 tailLength: tailLength,
                 stopAtProgramCounter: stopAtProgramCounter,
                 stopAtProgramCounterHits: stopAtProgramCounterHits,
+                trackedProgramCounters: trackedProgramCounterSet,
                 watchWordAddresses: watchWordAddresses,
                 stopOnWatchWordChangeAddresses: stopOnWatchWordChangeSet,
                 maxMemoryWatchEvents: DefaultMaxMemoryWatchEvents);
@@ -1054,41 +1255,61 @@ static TracedRunResult RunBudgetWithTrace(
         executed += chunkExecuted;
         remaining -= chunkExecuted;
         MergeHotSpots(hotSpotCounters, traceSummary.HotSpots);
+        MergeTrackedProgramCounterHits(trackedProgramCounterHits, traceSummary.TrackedProgramCounterHits);
         MergeProgramCounterTail(tail, traceSummary.ProgramCounterTail, tailLength);
         MergeMemoryWatchEvents(memoryWatchEvents, traceSummary.MemoryWatchEvents, DefaultMaxMemoryWatchEvents);
 
-        if (stopAtProgramCounter.HasValue &&
-            machine.ProgramCounter == stopAtProgramCounter.Value)
+        if (progressEveryInstructions > 0 &&
+            progressCallback is not null &&
+            (executed >= nextProgressCheckpoint ||
+             traceSummary.StopReason != ExecutionStopReason.InstructionBudgetReached))
         {
-            stopPointReached = true;
-            break;
-        }
+            var instructionsPerSecond = runStopwatch.Elapsed.TotalSeconds > 0
+                ? executed / runStopwatch.Elapsed.TotalSeconds
+                : 0;
 
-        if (traceSummary.StopAtProgramCounterHitReached)
-        {
-            stopAtProgramCounterHitReached = true;
-            break;
-        }
+            progressCallback(new TraceProgress(
+                executed,
+                remaining,
+                machine.ProgramCounter,
+                instructionsPerSecond,
+                traceSummary.StopReason));
 
-        if (traceSummary.StopOnWatchWordChangeReached)
-        {
-            stopOnWatchWordChangeReached = true;
-            break;
+            while (nextProgressCheckpoint <= executed)
+            {
+                nextProgressCheckpoint += progressEveryInstructions;
+            }
         }
 
         if (chunkExecuted == 0)
         {
             break;
         }
+
+        if (traceSummary.StopReason != ExecutionStopReason.InstructionBudgetReached &&
+            traceSummary.StopReason != ExecutionStopReason.None)
+        {
+            stopReason = traceSummary.StopReason;
+            break;
+        }
+    }
+
+    if (stopReason == ExecutionStopReason.None)
+    {
+        if (machine.Halted)
+        {
+            stopReason = ExecutionStopReason.Halted;
+        }
+        else if (remaining <= 0)
+        {
+            stopReason = ExecutionStopReason.InstructionBudgetReached;
+        }
     }
 
     return new TracedRunResult(
         executed,
         tail?.ToArray() ?? Array.Empty<uint>(),
-        stopPointReached,
-        stopAtProgramCounterHitReached,
-        StopOnSupervisorServiceReached: false,
-        stopOnWatchWordChangeReached,
+        stopReason,
         memoryWatchEvents?.ToArray() ?? Array.Empty<MemoryWatchTraceEntry>());
 }
 
@@ -1523,7 +1744,7 @@ static void PrintSpecialPurposeRegisters(PowerPc32CpuCore powerPcCore)
     }
 }
 
-static void PrintFirmwareGlobals(EmulationMachine machine)
+static IReadOnlyDictionary<string, uint> ReadFirmwareGlobals(EmulationMachine machine)
 {
     // Cisco ROM monitor global workspace in this image.
     var globals = new (string Name, uint Address)[]
@@ -1554,11 +1775,23 @@ static void PrintFirmwareGlobals(EmulationMachine machine)
         ("g_0x82F407A0", 0x82F407A0),
     };
 
-    Console.WriteLine("FirmwareGlobals:");
+    var values = new Dictionary<string, uint>(globals.Length, StringComparer.Ordinal);
 
     foreach (var global in globals)
     {
-        Console.WriteLine($"  {global.Name}=0x{machine.ReadUInt32(global.Address):X8}");
+        values[global.Name] = machine.ReadUInt32(global.Address);
+    }
+
+    return values;
+}
+
+static void PrintFirmwareGlobals(IReadOnlyDictionary<string, uint> globals)
+{
+    Console.WriteLine("FirmwareGlobals:");
+
+    foreach (var global in globals.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+    {
+        Console.WriteLine($"  {global.Key}=0x{global.Value:X8}");
     }
 }
 
@@ -1618,6 +1851,26 @@ static void MergeHotSpots(
     }
 }
 
+static void MergeTrackedProgramCounterHits(
+    IDictionary<uint, long> destination,
+    IReadOnlyDictionary<uint, long> source)
+{
+    if (destination.Count == 0 || source.Count == 0)
+    {
+        return;
+    }
+
+    foreach (var (programCounter, hits) in source)
+    {
+        if (!destination.ContainsKey(programCounter))
+        {
+            continue;
+        }
+
+        destination[programCounter] = destination[programCounter] + hits;
+    }
+}
+
 static void MergeProgramCounterTail(
     IList<uint>? destination,
     IReadOnlyList<uint> source,
@@ -1660,12 +1913,109 @@ static void MergeMemoryWatchEvents(
     }
 }
 
+static ProbeRunReport CreateProbeReport(
+    string imagePath,
+    int imageSizeBytes,
+    ImageInspectionResult inspection,
+    long instructionBudget,
+    int memoryMb,
+    long baseExecutedInstructions,
+    long executedInstructions,
+    long executedInstructionsFromBoot,
+    double runWallClockSeconds,
+    double runInstructionsPerSecond,
+    RuntimeSessionState state,
+    TracedRunResult traceRun,
+    bool stopOnSupervisorServiceReached,
+    IReadOnlyList<KeyValuePair<uint, long>> topHotSpots,
+    IReadOnlyDictionary<uint, long> trackedProgramCounterHits,
+    IReadOnlyDictionary<string, uint> firmwareGlobals,
+    IReadOnlyList<string> profileNames,
+    string consoleOutput)
+{
+    var firmwareGlobalValues = firmwareGlobals
+        .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+        .ToDictionary(
+            entry => entry.Key,
+            entry => $"0x{entry.Value:X8}",
+            StringComparer.Ordinal);
+    var trackedHits = trackedProgramCounterHits
+        .OrderBy(entry => entry.Key)
+        .ToDictionary(
+            entry => $"0x{entry.Key:X8}",
+            entry => entry.Value,
+            StringComparer.Ordinal);
+    var hotSpots = topHotSpots
+        .Select(entry => new ProbeHotSpotReport($"0x{entry.Key:X8}", entry.Value))
+        .ToArray();
+    var tail = traceRun.ProgramCounterTail
+        .Select(programCounter => $"0x{programCounter:X8}")
+        .ToArray();
+    var watchEvents = traceRun.MemoryWatchEvents
+        .Select(entry => new ProbeMemoryWatchEventReport(
+            $"0x{entry.ProgramCounter:X8}",
+            $"0x{entry.Address:X8}",
+            $"0x{entry.PreviousValue:X8}",
+            $"0x{entry.CurrentValue:X8}"))
+        .ToArray();
+
+    return new ProbeRunReport(
+        DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+        imagePath,
+        imageSizeBytes,
+        inspection.Format.ToString(),
+        inspection.Architecture.ToString(),
+        inspection.Endianness.ToString(),
+        inspection.Summary,
+        inspection.CiscoFamily,
+        inspection.CiscoImageTag,
+        $"0x{inspection.EntryPoint:X8}",
+        inspection.Sections.Count,
+        instructionBudget,
+        memoryMb,
+        baseExecutedInstructions,
+        executedInstructions,
+        executedInstructionsFromBoot,
+        runWallClockSeconds,
+        runInstructionsPerSecond,
+        state.Machine.Halted,
+        $"0x{state.Machine.ProgramCounter:X8}",
+        traceRun.StopReason.ToString(),
+        traceRun.StopReason == ExecutionStopReason.StopAtProgramCounter,
+        traceRun.StopReason == ExecutionStopReason.StopAtProgramCounterHit,
+        traceRun.StopReason == ExecutionStopReason.StopOnWatchWordChange,
+        stopOnSupervisorServiceReached,
+        profileNames.ToArray(),
+        firmwareGlobalValues,
+        trackedHits,
+        hotSpots,
+        tail,
+        watchEvents,
+        consoleOutput);
+}
+
+static void SaveProbeReport(string reportJsonPath, ProbeRunReport report)
+{
+    var directory = Path.GetDirectoryName(reportJsonPath);
+
+    if (!string.IsNullOrEmpty(directory))
+    {
+        Directory.CreateDirectory(directory);
+    }
+
+    var json = JsonSerializer.Serialize(report, ProbeReportJson.SerializerOptions);
+    File.WriteAllText(reportJsonPath, json);
+}
+
 file sealed record ProbeCliOptions(
     string? CheckpointFilePath,
     string? SaveCheckpointFilePath,
+    string? ReportJsonPath,
     long? CheckpointAtInstructions,
     bool CheckpointForceRebuild,
     int ChunkBudget,
+    int MaxHotSpots,
+    long ProgressEveryInstructions,
     uint? StopAtProgramCounter,
     IReadOnlyDictionary<uint, long> StopAtProgramCounterHits,
     uint? StopOnSupervisorService,
@@ -1676,16 +2026,73 @@ file sealed record ProbeCliOptions(
     IReadOnlyList<uint> WatchWordAddresses,
     IReadOnlyList<uint> StopOnWatchWordChangeAddresses,
     IReadOnlyList<uint> TrackedProgramCounters,
+    IReadOnlyList<string> ProfileNames,
     string[] RegisterOverrideTokens);
 
 file sealed record TracedRunResult(
     long ExecutedInstructions,
     IReadOnlyList<uint> ProgramCounterTail,
-    bool StopPointReached,
-    bool StopAtProgramCounterHitReached,
-    bool StopOnSupervisorServiceReached,
-    bool StopOnWatchWordChangeReached,
+    ExecutionStopReason StopReason,
     IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents);
+
+file sealed record TraceProgress(
+    long ExecutedInstructions,
+    long RemainingInstructions,
+    uint ProgramCounter,
+    double InstructionsPerSecond,
+    ExecutionStopReason LastChunkStopReason);
+
+file sealed record ProbeRunReport(
+    string GeneratedAtUtc,
+    string ImagePath,
+    int ImageSizeBytes,
+    string Format,
+    string Architecture,
+    string Endianness,
+    string Summary,
+    string? CiscoFamily,
+    string? CiscoImageTag,
+    string EntryPoint,
+    int SegmentCount,
+    long InstructionBudget,
+    int MemoryMb,
+    long BaseExecutedInstructions,
+    long ExecutedInstructions,
+    long ExecutedInstructionsFromBoot,
+    double RunWallClockSeconds,
+    double RunInstructionsPerSecond,
+    bool Halted,
+    string FinalProgramCounter,
+    string StopReason,
+    bool StopAtProgramCounterReached,
+    bool StopAtProgramCounterHitReached,
+    bool StopOnWatch32ChangeReached,
+    bool StopOnSupervisorServiceReached,
+    IReadOnlyList<string> Profiles,
+    IReadOnlyDictionary<string, string> FirmwareGlobals,
+    IReadOnlyDictionary<string, long> TrackedProgramCounterHits,
+    IReadOnlyList<ProbeHotSpotReport> HotSpots,
+    IReadOnlyList<string> ProgramCounterTail,
+    IReadOnlyList<ProbeMemoryWatchEventReport> MemoryWatchEvents,
+    string ConsoleOutput);
+
+file sealed record ProbeHotSpotReport(
+    string ProgramCounter,
+    long Hits);
+
+file sealed record ProbeMemoryWatchEventReport(
+    string ProgramCounter,
+    string Address,
+    string PreviousValue,
+    string CurrentValue);
+
+file static class ProbeReportJson
+{
+    internal static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        WriteIndented = true,
+    };
+}
 
 file sealed record InstructionWindowRequest(
     uint Address,

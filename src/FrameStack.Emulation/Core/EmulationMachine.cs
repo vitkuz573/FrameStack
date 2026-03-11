@@ -58,6 +58,7 @@ public sealed class EmulationMachine
         int tailLength = 0,
         uint? stopAtProgramCounter = null,
         IReadOnlyDictionary<uint, long>? stopAtProgramCounterHits = null,
+        IReadOnlySet<uint>? trackedProgramCounters = null,
         IReadOnlyList<uint>? watchWordAddresses = null,
         IReadOnlySet<uint>? stopOnWatchWordChangeAddresses = null,
         int maxMemoryWatchEvents = 512)
@@ -67,9 +68,9 @@ public sealed class EmulationMachine
             throw new ArgumentOutOfRangeException(nameof(instructionBudget), "Instruction budget must be greater than zero.");
         }
 
-        if (maxHotSpots <= 0)
+        if (maxHotSpots < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(maxHotSpots), "Hot spot count must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(maxHotSpots), "Hot spot count cannot be negative.");
         }
 
         if (tailLength < 0)
@@ -84,15 +85,37 @@ public sealed class EmulationMachine
                 "Max memory watch events cannot be negative.");
         }
 
-        var hitCounter = new Dictionary<uint, int>();
+        Dictionary<uint, int>? hotSpotCounter = null;
+        Dictionary<uint, int>? stopAtProgramCounterHitCounter = null;
+        Dictionary<uint, long>? trackedProgramCounterHitCounter = null;
+        var trackHotSpots = maxHotSpots > 0;
         var executedThisRun = 0;
         var tailBuffer = tailLength > 0 ? new uint[tailLength] : null;
         var tailIndex = 0;
         var tailCount = 0;
         var watchEvents = new List<MemoryWatchTraceEntry>();
-        var stopAtProgramCounterHitReached = false;
-        var stopOnWatchWordChangeReached = false;
+        var stopReason = ExecutionStopReason.None;
         List<MemoryWatchState>? watchStates = null;
+
+        if (trackHotSpots)
+        {
+            hotSpotCounter = new Dictionary<uint, int>();
+        }
+
+        if (stopAtProgramCounterHits is { Count: > 0 })
+        {
+            stopAtProgramCounterHitCounter = new Dictionary<uint, int>(stopAtProgramCounterHits.Count);
+        }
+
+        if (trackedProgramCounters is { Count: > 0 })
+        {
+            trackedProgramCounterHitCounter = new Dictionary<uint, long>(trackedProgramCounters.Count);
+
+            foreach (var trackedProgramCounter in trackedProgramCounters)
+            {
+                trackedProgramCounterHitCounter[trackedProgramCounter] = 0;
+            }
+        }
 
         if (watchWordAddresses is { Count: > 0 })
         {
@@ -111,20 +134,45 @@ public sealed class EmulationMachine
             if (stopAtProgramCounter.HasValue &&
                 pc == stopAtProgramCounter.Value)
             {
+                stopReason = ExecutionStopReason.StopAtProgramCounter;
                 break;
             }
 
-            hitCounter.TryGetValue(pc, out var hits);
-            var pcHits = hits + 1;
-            hitCounter[pc] = pcHits;
+            if (hotSpotCounter is not null)
+            {
+                hotSpotCounter.TryGetValue(pc, out var hits);
+                hotSpotCounter[pc] = hits + 1;
+            }
+
+            if (trackedProgramCounterHitCounter is not null &&
+                trackedProgramCounterHitCounter.TryGetValue(pc, out var trackedHits))
+            {
+                trackedProgramCounterHitCounter[pc] = trackedHits + 1;
+            }
 
             if (stopAtProgramCounterHits is not null &&
                 stopAtProgramCounterHits.TryGetValue(pc, out var requiredHits) &&
-                requiredHits > 0 &&
-                pcHits >= requiredHits)
+                requiredHits > 0)
             {
-                stopAtProgramCounterHitReached = true;
-                break;
+                var pcHits = 0;
+
+                if (hotSpotCounter is not null &&
+                    hotSpotCounter.TryGetValue(pc, out var hotSpotHits))
+                {
+                    pcHits = hotSpotHits;
+                }
+                else if (stopAtProgramCounterHitCounter is not null)
+                {
+                    stopAtProgramCounterHitCounter.TryGetValue(pc, out var existingHits);
+                    pcHits = existingHits + 1;
+                    stopAtProgramCounterHitCounter[pc] = pcHits;
+                }
+
+                if (pcHits >= requiredHits)
+                {
+                    stopReason = ExecutionStopReason.StopAtProgramCounterHit;
+                    break;
+                }
             }
 
             if (tailBuffer is not null)
@@ -167,16 +215,28 @@ public sealed class EmulationMachine
                         if (stopOnWatchWordChangeAddresses is not null &&
                             stopOnWatchWordChangeAddresses.Contains(state.Address))
                         {
-                            stopOnWatchWordChangeReached = true;
+                            stopReason = ExecutionStopReason.StopOnWatchWordChange;
                             break;
                         }
                     }
                 }
             }
 
-            if (stopOnWatchWordChangeReached)
+            if (stopReason == ExecutionStopReason.StopOnWatchWordChange)
             {
                 break;
+            }
+        }
+
+        if (stopReason == ExecutionStopReason.None)
+        {
+            if (_cpu.Halted)
+            {
+                stopReason = ExecutionStopReason.Halted;
+            }
+            else if (executedThisRun >= instructionBudget)
+            {
+                stopReason = ExecutionStopReason.InstructionBudgetReached;
             }
         }
 
@@ -185,12 +245,18 @@ public sealed class EmulationMachine
             _cpu.Halted,
             _cpu.ProgramCounter);
 
-        var hotSpots = hitCounter
-            .OrderByDescending(pair => pair.Value)
-            .ThenBy(pair => pair.Key)
-            .Take(maxHotSpots)
-            .Select(pair => new ExecutionTraceEntry(pair.Key, pair.Value))
-            .ToArray();
+        IReadOnlyList<ExecutionTraceEntry> hotSpots = Array.Empty<ExecutionTraceEntry>();
+
+        if (hotSpotCounter is { Count: > 0 } &&
+            maxHotSpots > 0)
+        {
+            hotSpots = hotSpotCounter
+                .OrderByDescending(pair => pair.Value)
+                .ThenBy(pair => pair.Key)
+                .Take(maxHotSpots)
+                .Select(pair => new ExecutionTraceEntry(pair.Key, pair.Value))
+                .ToArray();
+        }
 
         IReadOnlyList<uint> programCounterTail = Array.Empty<uint>();
 
@@ -214,8 +280,8 @@ public sealed class EmulationMachine
             hotSpots,
             programCounterTail,
             watchEvents,
-            stopAtProgramCounterHitReached,
-            stopOnWatchWordChangeReached);
+            trackedProgramCounterHitCounter ?? (IReadOnlyDictionary<uint, long>)new Dictionary<uint, long>(),
+            stopReason);
     }
 
     private readonly record struct MemoryWatchState(

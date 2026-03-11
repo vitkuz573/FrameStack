@@ -62,14 +62,33 @@ Arguments:
 - optional trace controls:
   - `--watch32 0x...`
   - `--count-pc 0x...`
+  - `--max-hotspots <count>` or `--full-hotspots`
   - `--window 0x...:<before>:<after>`
+  - `--progress-every <instructions>`
+  - `--report-json /absolute/path/to/report.json`
+  - `--profile c2600-ram-probe`
   - `--checkpoint-file <path>` / `--checkpoint-force-rebuild`
 
 Probe output includes:
 
 - execution hot spots and final register snapshot;
+- explicit stop reason (`InstructionBudgetReached`, `Halted`, stop conditions);
+- exact `count-pc` hit totals (independent from hot spot aggregation);
 - supervisor-call counters/subcall counters;
 - captured console stream emitted through firmware monitor calls.
+
+Example (long-run diagnostics with structured report):
+
+```bash
+dotnet run --project tools/FrameStack.ImageProbe -- /path/to/cisco.bin 500000000 256 0 \
+  --checkpoint-file .tmp/checkpoints/c2600.chk \
+  --profile c2600-ram-probe \
+  --count-pc 0x816E292C \
+  --stop-at-pc-hit 0x816E292C=32 \
+  --max-hotspots 0 \
+  --progress-every 20000000 \
+  --report-json .tmp/reports/c2600-run.json
+```
 
 ## Main API
 

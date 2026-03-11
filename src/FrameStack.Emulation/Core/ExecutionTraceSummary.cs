@@ -5,5 +5,12 @@ public sealed record ExecutionTraceSummary(
     IReadOnlyList<ExecutionTraceEntry> HotSpots,
     IReadOnlyList<uint> ProgramCounterTail,
     IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents,
-    bool StopAtProgramCounterHitReached,
-    bool StopOnWatchWordChangeReached);
+    IReadOnlyDictionary<uint, long> TrackedProgramCounterHits,
+    ExecutionStopReason StopReason)
+{
+    public bool StopAtProgramCounterReached => StopReason == ExecutionStopReason.StopAtProgramCounter;
+
+    public bool StopAtProgramCounterHitReached => StopReason == ExecutionStopReason.StopAtProgramCounterHit;
+
+    public bool StopOnWatchWordChangeReached => StopReason == ExecutionStopReason.StopOnWatchWordChange;
+}
