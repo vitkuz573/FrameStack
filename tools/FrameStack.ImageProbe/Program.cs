@@ -298,7 +298,7 @@ try
         {
             var pc = state.Machine.ProgramCounter;
             var (instructionWord, hasImageWord, imageWord) =
-                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, pc);
+                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, pc, powerPcCore);
             var opcode = (instructionWord >> 26).ToString("X2", CultureInfo.InvariantCulture);
             var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
@@ -421,7 +421,7 @@ try
         foreach (var pc in traceRun.ProgramCounterTail)
         {
             var (instructionWord, hasImageWord, imageWord) =
-                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, pc);
+                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, pc, powerPcCore);
             var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
             Console.WriteLine(
@@ -476,7 +476,7 @@ try
     foreach (var hotSpot in topHotSpots)
     {
         var (instructionWord, hasImageWord, imageWord) =
-            ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, hotSpot.Key);
+            ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, hotSpot.Key, powerPcCore);
         var majorOpcode = instructionWord >> 26;
         var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
@@ -492,7 +492,7 @@ try
         {
             trackedProgramCounterHits.TryGetValue(trackedPc, out var hits);
             var (instructionWord, hasImageWord, imageWord) =
-                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, trackedPc);
+                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, trackedPc, powerPcCore);
             var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
             Console.WriteLine(
@@ -508,7 +508,8 @@ try
         state.Machine.ProgramCounter,
         before: 5,
         after: 5,
-        label: "FinalProgramCounter");
+        label: "FinalProgramCounter",
+        powerPcCore);
 
     if (topHotSpots.Length > 0 && topHotSpots[0].Key != state.Machine.ProgramCounter)
     {
@@ -519,7 +520,8 @@ try
             topHotSpots[0].Key,
             before: 5,
             after: 5,
-            label: "TopHotSpot");
+            label: "TopHotSpot",
+            powerPcCore);
     }
 
     if (cliOptions.AdditionalInstructionWindows.Count > 0)
@@ -533,7 +535,8 @@ try
                 window.Address,
                 window.Before,
                 window.After,
-                label: $"Window@0x{window.Address:X8}");
+                label: $"Window@0x{window.Address:X8}",
+                powerPcCore);
         }
     }
 
@@ -547,7 +550,8 @@ try
             linkRegister,
             before: 16,
             after: 8,
-            label: "LinkRegister");
+            label: "LinkRegister",
+            powerPcCore);
 
         if (linkRegister >= 4)
         {
@@ -558,7 +562,8 @@ try
                 linkRegister - 4,
                 before: 24,
                 after: 12,
-                label: "LinkReturnSite");
+                label: "LinkReturnSite",
+                powerPcCore);
         }
     }
 
@@ -2135,14 +2140,16 @@ static void PrintInstructionWindow(
     uint centerAddress,
     int before,
     int after,
-    string label)
+    string label,
+    PowerPc32CpuCore? powerPcCore = null)
 {
     Console.WriteLine($"  {label} center=0x{centerAddress:X8}:");
 
     for (var offset = -before; offset <= after; offset++)
     {
         var address = unchecked((uint)((long)centerAddress + (offset * 4L)));
-        var (instruction, hasImageWord, imageWord) = ReadInstructionWord(machine, sections, imageBytes, address);
+        var (instruction, hasImageWord, imageWord) =
+            ReadInstructionWord(machine, sections, imageBytes, address, powerPcCore);
         var source = FormatInstructionSource(instruction, hasImageWord, imageWord);
         var marker = offset == 0 ? "=>" : "  ";
         var description = DescribeInstruction(address, instruction);
@@ -2155,9 +2162,13 @@ static (uint MemoryWord, bool HasImageWord, uint ImageWord) ReadInstructionWord(
     EmulationMachine machine,
     IReadOnlyList<ImageSectionDescriptor> sections,
     byte[] imageBytes,
-    uint virtualAddress)
+    uint virtualAddress,
+    PowerPc32CpuCore? powerPcCore = null)
 {
-    var memoryWord = machine.ReadUInt32(virtualAddress);
+    var memoryAddress = powerPcCore is null
+        ? virtualAddress
+        : powerPcCore.TranslateInstructionAddressForDebug(virtualAddress);
+    var memoryWord = machine.ReadUInt32(memoryAddress);
     var hasImageWord = TryReadWordAtVirtualAddress(sections, imageBytes, virtualAddress, out var imageWord);
 
     return (memoryWord, hasImageWord, imageWord);

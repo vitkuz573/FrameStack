@@ -76,6 +76,16 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return CaptureTlbEntries(_dataTlb);
     }
 
+    public uint TranslateInstructionAddressForDebug(uint effectiveAddress)
+    {
+        return TranslateInstructionAddress(effectiveAddress);
+    }
+
+    public uint TranslateDataAddressForDebug(uint effectiveAddress)
+    {
+        return TranslateDataAddress(effectiveAddress);
+    }
+
     public IPowerPcSupervisorCallHandler SupervisorCallHandler { get; set; }
 
     public uint ReadSpecialPurposeRegister(int spr)
@@ -248,7 +258,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 ExecuteBranchConditional(instruction, pc);
                 break;
             case 17:
-                ExecuteSystemCall();
+                ExecuteSystemCall(memoryBus);
                 break;
             case 18:
                 ExecuteBranchImmediate(instruction, pc);
@@ -398,7 +408,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _registers.Pc += 4;
     }
 
-    private void ExecuteSystemCall()
+    private void ExecuteSystemCall(IMemoryBus memoryBus)
     {
         _supervisorCallCounters.TryGetValue(_registers[3], out var currentCount);
         _supervisorCallCounters[_registers[3]] = currentCount + 1;
@@ -410,7 +420,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
             _registers[5],
             _registers[6],
             _registers[7],
-            _registers.Lr);
+            _registers.Lr,
+            (uint effectiveAddress, out uint value) => TryReadSupervisorUInt32(memoryBus, effectiveAddress, out value),
+            (uint effectiveAddress, uint value) => TryWriteSupervisorUInt32(memoryBus, effectiveAddress, value),
+            (uint effectiveAddress, out byte value) => TryReadSupervisorByte(memoryBus, effectiveAddress, out value),
+            (uint effectiveAddress, byte value) => TryWriteSupervisorByte(memoryBus, effectiveAddress, value));
 
         var result = SupervisorCallHandler.Handle(context);
         _registers[3] = result.ReturnValue;
@@ -1611,6 +1625,60 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void WriteDataByte(IMemoryBus memoryBus, uint effectiveAddress, byte value)
     {
         memoryBus.WriteByte(TranslateDataAddress(effectiveAddress), value);
+    }
+
+    private bool TryReadSupervisorUInt32(IMemoryBus memoryBus, uint effectiveAddress, out uint value)
+    {
+        try
+        {
+            value = ReadDataUInt32(memoryBus, effectiveAddress);
+            return true;
+        }
+        catch
+        {
+            value = 0;
+            return false;
+        }
+    }
+
+    private bool TryWriteSupervisorUInt32(IMemoryBus memoryBus, uint effectiveAddress, uint value)
+    {
+        try
+        {
+            WriteDataUInt32(memoryBus, effectiveAddress, value);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryReadSupervisorByte(IMemoryBus memoryBus, uint effectiveAddress, out byte value)
+    {
+        try
+        {
+            value = ReadDataByte(memoryBus, effectiveAddress);
+            return true;
+        }
+        catch
+        {
+            value = 0;
+            return false;
+        }
+    }
+
+    private bool TryWriteSupervisorByte(IMemoryBus memoryBus, uint effectiveAddress, byte value)
+    {
+        try
+        {
+            WriteDataByte(memoryBus, effectiveAddress, value);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private uint ReadDataUInt16(IMemoryBus memoryBus, uint effectiveAddress)

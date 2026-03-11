@@ -21,7 +21,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
     }
 
     [Fact]
-    public void HandleShouldReturnRequestedProbeChunkWhenItFitsReportedMemory()
+    public void HandleShouldReturnReportedMemoryForProbeChunkQuery()
     {
         var handler = new DefaultPowerPcSupervisorCallHandler(0x1000_0000);
 
@@ -33,7 +33,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument2: 0,
             Argument3: 0));
 
-        Assert.Equal(0x0040_0000u, result.ReturnValue);
+        Assert.Equal(0x1000_0000u, result.ReturnValue);
     }
 
     [Fact]
@@ -82,5 +82,55 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 4));
 
         Assert.Equal(0u, result.ReturnValue);
+    }
+
+    [Fact]
+    public void HandleShouldRoundTripIoMemoryProfileUsingSetAndReadServices()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler();
+
+        var setResult = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3B,
+            Argument0: 0x0000_0067, // encoded as 100 + 3
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        var readResult = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3C,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        Assert.Equal(3u, setResult.ReturnValue);
+        Assert.Equal(3u, readResult.ReturnValue);
+    }
+
+    [Fact]
+    public void HandleShouldSeedIoMemoryProfileDescriptorForBootstrapService()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler();
+        var writes = new Dictionary<uint, uint>();
+        var writeWord = new PowerPcSupervisorTryWriteUInt32((uint address, uint value) =>
+        {
+            writes[address] = value;
+            return true;
+        });
+
+        handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x2C,
+            Argument0: 0x1000,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0,
+            TryWriteUInt32: writeWord));
+
+        Assert.Equal(0u, writes[0x1000]);
+        Assert.Equal(0u, writes[0x1004]);
+        Assert.Equal(0u, writes[0x1008]);
     }
 }

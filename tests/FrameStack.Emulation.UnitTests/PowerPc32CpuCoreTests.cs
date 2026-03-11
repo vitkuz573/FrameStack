@@ -855,6 +855,32 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void SystemCallContextShouldExposeDataMemoryCallbacks()
+    {
+        var handler = new CallbackSupervisorCallHandler(context =>
+        {
+            Assert.True(context.TryReadDataUInt32(context.Argument0, out var originalWord));
+            Assert.Equal(0x1122_3344u, originalWord);
+            Assert.True(context.TryWriteDataUInt32(context.Argument0, 0xAABB_CCDD));
+            Assert.True(context.TryWriteDataByte(context.Argument0 + 3, 0xEF));
+            return new PowerPcSupervisorCallResult(ReturnValue: 0);
+        });
+
+        var cpu = new PowerPc32CpuCore(handler);
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+        memory.WriteUInt32(0x1000, 0x4400_0002); // sc
+        memory.WriteUInt32(0x2000, 0x1122_3344);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x77;
+        cpu.Registers[4] = 0x2000;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xAABB_CCEFu, memory.ReadUInt32(0x2000));
+    }
+
+    [Fact]
     public void CompareAndBeqShouldBranchOnEqual()
     {
         var cpu = new PowerPc32CpuCore();
@@ -977,6 +1003,15 @@ public sealed class PowerPc32CpuCoreTests
         {
             LastContext = context;
             return result;
+        }
+    }
+
+    private sealed class CallbackSupervisorCallHandler(Func<PowerPcSupervisorCallContext, PowerPcSupervisorCallResult> callback)
+        : IPowerPcSupervisorCallHandler
+    {
+        public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
+        {
+            return callback(context);
         }
     }
 }
