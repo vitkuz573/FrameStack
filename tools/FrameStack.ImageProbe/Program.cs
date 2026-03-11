@@ -2195,19 +2195,95 @@ static string DescribeInstruction(uint programCounter, uint instructionWord)
 
     return opcode switch
     {
+        7 => DescribeMultiplyLowImmediate(instructionWord),
+        8 => DescribeSubtractFromImmediateCarrying(instructionWord),
+        10 => DescribeCompareLogicalImmediate(instructionWord),
+        11 => DescribeCompareImmediate(instructionWord),
+        12 => DescribeAddImmediateCarrying(instructionWord),
+        13 => DescribeAddImmediateCarryingRecord(instructionWord),
         14 => DescribeAddImmediate(instructionWord),
         15 => DescribeAddImmediateShifted(instructionWord),
         16 => DescribeConditionalBranch(programCounter, instructionWord),
         18 => DescribeUnconditionalBranch(programCounter, instructionWord),
         19 => DescribeOpcode19(instructionWord),
+        21 => DescribeRotateLeftWordImmediateAndMask(instructionWord),
         24 => DescribeOrImmediate(instructionWord),
+        25 => DescribeOrImmediateShifted(instructionWord),
+        26 => DescribeXorImmediate(instructionWord),
+        27 => DescribeXorImmediateShifted(instructionWord),
+        28 => DescribeAndImmediate(instructionWord),
+        29 => DescribeAndImmediateShifted(instructionWord),
         31 => DescribeXForm(instructionWord),
         32 => DescribeLoadWord(instructionWord),
+        33 => DescribeLoadWordUpdate(instructionWord),
         34 => DescribeLoadByte(instructionWord),
+        35 => DescribeLoadByteUpdate(instructionWord),
         36 => DescribeStoreWord(instructionWord),
+        37 => DescribeStoreWordUpdate(instructionWord),
         38 => DescribeStoreByte(instructionWord),
+        39 => DescribeStoreByteUpdate(instructionWord),
+        40 => DescribeLoadHalfWord(instructionWord),
+        41 => DescribeLoadHalfWordUpdate(instructionWord),
+        42 => DescribeLoadHalfWordAlgebraic(instructionWord),
+        43 => DescribeLoadHalfWordAlgebraicUpdate(instructionWord),
+        44 => DescribeStoreHalfWord(instructionWord),
+        45 => DescribeStoreHalfWordUpdate(instructionWord),
+        46 => DescribeLoadMultipleWord(instructionWord),
+        47 => DescribeStoreMultipleWord(instructionWord),
         _ => $"op=0x{opcode:X2}",
     };
+}
+
+static string DescribeMultiplyLowImmediate(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = ExtractSignedImmediate(instructionWord);
+    return $"mulli rt=r{rt} ra=r{ra} imm={immediate}";
+}
+
+static string DescribeSubtractFromImmediateCarrying(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = ExtractSignedImmediate(instructionWord);
+    return $"subfic rt=r{rt} ra=r{ra} imm={immediate}";
+}
+
+static string DescribeCompareLogicalImmediate(uint instructionWord)
+{
+    var crField = (int)((instructionWord >> 23) & 0x7);
+    var l = (instructionWord & (1u << 21)) != 0;
+    var ra = ExtractRa(instructionWord);
+    var immediate = instructionWord & 0xFFFF;
+    var mnemonic = l ? "cmpldi" : "cmplwi";
+    return $"{mnemonic} crf={crField} ra=r{ra} imm=0x{immediate:X4}";
+}
+
+static string DescribeCompareImmediate(uint instructionWord)
+{
+    var crField = (int)((instructionWord >> 23) & 0x7);
+    var l = (instructionWord & (1u << 21)) != 0;
+    var ra = ExtractRa(instructionWord);
+    var immediate = ExtractSignedImmediate(instructionWord);
+    var mnemonic = l ? "cmpdi" : "cmpwi";
+    return $"{mnemonic} crf={crField} ra=r{ra} imm={immediate}";
+}
+
+static string DescribeAddImmediateCarrying(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = ExtractSignedImmediate(instructionWord);
+    return $"addic rt=r{rt} ra=r{ra} imm={immediate}";
+}
+
+static string DescribeAddImmediateCarryingRecord(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = ExtractSignedImmediate(instructionWord);
+    return $"addic. rt=r{rt} ra=r{ra} imm={immediate}";
 }
 
 static string DescribeAddImmediate(uint instructionWord)
@@ -2234,12 +2310,71 @@ static string DescribeOrImmediate(uint instructionWord)
     return $"ori ra=r{ra} rs=r{rs} imm=0x{immediate:X4}";
 }
 
+static string DescribeOrImmediateShifted(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = instructionWord & 0xFFFF;
+    return $"oris ra=r{ra} rs=r{rs} imm=0x{immediate:X4}";
+}
+
+static string DescribeXorImmediate(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = instructionWord & 0xFFFF;
+    return $"xori ra=r{ra} rs=r{rs} imm=0x{immediate:X4}";
+}
+
+static string DescribeXorImmediateShifted(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = instructionWord & 0xFFFF;
+    return $"xoris ra=r{ra} rs=r{rs} imm=0x{immediate:X4}";
+}
+
+static string DescribeAndImmediate(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = instructionWord & 0xFFFF;
+    return $"andi. ra=r{ra} rs=r{rs} imm=0x{immediate:X4}";
+}
+
+static string DescribeAndImmediateShifted(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var immediate = instructionWord & 0xFFFF;
+    return $"andis. ra=r{ra} rs=r{rs} imm=0x{immediate:X4}";
+}
+
+static string DescribeRotateLeftWordImmediateAndMask(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var shift = (int)((instructionWord >> 11) & 0x1F);
+    var mb = (int)((instructionWord >> 6) & 0x1F);
+    var me = (int)((instructionWord >> 1) & 0x1F);
+    var record = (instructionWord & 0x1) != 0 ? "." : string.Empty;
+    return $"rlwinm{record} ra=r{ra} rs=r{rs} sh={shift} mb={mb} me={me}";
+}
+
 static string DescribeLoadWord(uint instructionWord)
 {
     var rt = ExtractRt(instructionWord);
     var ra = ExtractRa(instructionWord);
     var displacement = ExtractSignedImmediate(instructionWord);
     return $"lwz rt=r{rt} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeLoadWordUpdate(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lwzu rt=r{rt} d={displacement}(r{ra})";
 }
 
 static string DescribeLoadByte(uint instructionWord)
@@ -2250,6 +2385,14 @@ static string DescribeLoadByte(uint instructionWord)
     return $"lbz rt=r{rt} d={displacement}({DescribeBaseRegister(ra)})";
 }
 
+static string DescribeLoadByteUpdate(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lbzu rt=r{rt} d={displacement}(r{ra})";
+}
+
 static string DescribeStoreWord(uint instructionWord)
 {
     var rs = ExtractRs(instructionWord);
@@ -2258,12 +2401,92 @@ static string DescribeStoreWord(uint instructionWord)
     return $"stw rs=r{rs} d={displacement}({DescribeBaseRegister(ra)})";
 }
 
+static string DescribeStoreWordUpdate(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"stwu rs=r{rs} d={displacement}(r{ra})";
+}
+
 static string DescribeStoreByte(uint instructionWord)
 {
     var rs = ExtractRs(instructionWord);
     var ra = ExtractRa(instructionWord);
     var displacement = ExtractSignedImmediate(instructionWord);
     return $"stb rs=r{rs} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeStoreByteUpdate(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"stbu rs=r{rs} d={displacement}(r{ra})";
+}
+
+static string DescribeLoadHalfWord(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lhz rt=r{rt} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeLoadHalfWordUpdate(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lhzu rt=r{rt} d={displacement}(r{ra})";
+}
+
+static string DescribeLoadHalfWordAlgebraic(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lha rt=r{rt} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeLoadHalfWordAlgebraicUpdate(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lhau rt=r{rt} d={displacement}(r{ra})";
+}
+
+static string DescribeStoreHalfWord(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"sth rs=r{rs} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeStoreHalfWordUpdate(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"sthu rs=r{rs} d={displacement}(r{ra})";
+}
+
+static string DescribeLoadMultipleWord(uint instructionWord)
+{
+    var rt = ExtractRt(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"lmw rt=r{rt} d={displacement}({DescribeBaseRegister(ra)})";
+}
+
+static string DescribeStoreMultipleWord(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var displacement = ExtractSignedImmediate(instructionWord);
+    return $"stmw rs=r{rs} d={displacement}({DescribeBaseRegister(ra)})";
 }
 
 static string DescribeOpcode19(uint instructionWord)
@@ -2286,16 +2509,61 @@ static string DescribeOpcode19(uint instructionWord)
 static string DescribeXForm(uint instructionWord)
 {
     var xo = (int)((instructionWord >> 1) & 0x3FF);
+    var rt = ExtractRt(instructionWord);
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var rb = ExtractRb(instructionWord);
+    var record = (instructionWord & 0x1) != 0 ? "." : string.Empty;
+    var overflow = (instructionWord & 0x400) != 0 ? "o" : string.Empty;
+    var crField = (int)((instructionWord >> 23) & 0x7);
 
     return xo switch
     {
-        19 => $"mfcr rt=r{ExtractRt(instructionWord)}",
-        83 => $"mfmsr rt=r{ExtractRt(instructionWord)}",
-        144 => $"mtcrf mask=0x{((instructionWord >> 12) & 0xFF):X2} rs=r{ExtractRs(instructionWord)}",
-        146 => $"mtmsr rs=r{ExtractRs(instructionWord)}",
-        339 => $"mfspr rt=r{ExtractRt(instructionWord)} spr={DescribeSpr(DecodeSpr(instructionWord))}",
-        371 => $"mftb rt=r{ExtractRt(instructionWord)} spr={DescribeSpr(DecodeSpr(instructionWord))}",
-        467 => $"mtspr spr={DescribeSpr(DecodeSpr(instructionWord))} rs=r{ExtractRs(instructionWord)}",
+        0 => $"cmpw crf={crField} ra=r{ra} rb=r{rb}",
+        8 => $"subfc{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        10 => $"addc{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        11 => $"mulhwu{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        19 => $"mfcr rt=r{rt}",
+        23 => $"lwzx rt=r{rt} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        24 => $"slw ra=r{ra} rs=r{rs} rb=r{rb}{record}",
+        28 => $"and{record} ra=r{ra} rs=r{rs} rb=r{rb}",
+        32 => $"cmplw crf={crField} ra=r{ra} rb=r{rb}",
+        40 => $"subf{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        55 => $"lwzux rt=r{rt} ra=r{ra} rb=r{rb}",
+        60 => $"andc{record} ra=r{ra} rs=r{rs} rb=r{rb}",
+        75 => $"mulhw{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        83 => $"mfmsr rt=r{rt}",
+        87 => $"lbzx rt=r{rt} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        104 => $"neg{overflow}{record} rt=r{rt} ra=r{ra}",
+        119 => $"lbzux rt=r{rt} ra=r{ra} rb=r{rb}",
+        124 => $"nor{record} ra=r{ra} rs=r{rs} rb=r{rb}",
+        136 => $"subfe{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        144 => $"mtcrf mask=0x{((instructionWord >> 12) & 0xFF):X2} rs=r{rs}",
+        146 => $"mtmsr rs=r{rs}",
+        151 => $"stwx rs=r{rs} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        183 => $"stwux rs=r{rs} ra=r{ra} rb=r{rb}",
+        200 => $"subfze{overflow}{record} rt=r{rt} ra=r{ra}",
+        202 => $"addze{overflow}{record} rt=r{rt} ra=r{ra}",
+        215 => $"stbx rs=r{rs} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        235 => $"mullw{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        247 => $"stbux rs=r{rs} ra=r{ra} rb=r{rb}",
+        266 => $"add{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        279 => $"lhzx rt=r{rt} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        311 => $"lhzux rt=r{rt} ra=r{ra} rb=r{rb}",
+        316 => $"xor{record} ra=r{ra} rs=r{rs} rb=r{rb}",
+        339 => $"mfspr rt=r{rt} spr={DescribeSpr(DecodeSpr(instructionWord))}",
+        343 => $"lhax rt=r{rt} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        371 => $"mftb rt=r{rt} spr={DescribeSpr(DecodeSpr(instructionWord))}",
+        375 => $"lhaux rt=r{rt} ra=r{ra} rb=r{rb}",
+        407 => $"sthx rs=r{rs} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        439 => $"sthux rs=r{rs} ra=r{ra} rb=r{rb}",
+        444 => $"or{record} ra=r{ra} rs=r{rs} rb=r{rb}",
+        459 => $"divwu{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        467 => $"mtspr spr={DescribeSpr(DecodeSpr(instructionWord))} rs=r{rs}",
+        476 => $"nand{record} ra=r{ra} rs=r{rs} rb=r{rb}",
+        491 => $"divw{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        824 =>
+            $"srawi{record} ra=r{ra} rs=r{rs} sh={(instructionWord >> 11) & 0x1F}",
         _ => $"op=0x1F xo=0x{xo:X3}",
     };
 }
@@ -2313,6 +2581,11 @@ static int ExtractRs(uint instructionWord)
 static int ExtractRa(uint instructionWord)
 {
     return (int)((instructionWord >> 16) & 0x1F);
+}
+
+static int ExtractRb(uint instructionWord)
+{
+    return (int)((instructionWord >> 11) & 0x1F);
 }
 
 static int ExtractSignedImmediate(uint instructionWord)
