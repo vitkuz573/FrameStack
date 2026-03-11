@@ -18,7 +18,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private const uint Mpc8xxTableBaseMask = 0xFFFF_F000;
     private const uint Mpc8xxLevelOneIndexMask = 0x0000_0FFC;
-    private const uint Mpc8xxLevelTwoIndexMask = 0x0000_0FFC;
+    private const uint Mpc8xxLevelTwoIndex4KbMask = 0x003F_FC00;
+    private const uint Mpc8xxLevelTwoIndexLargePageMask = 0x0000_0FFC;
     private const uint Mpc8xxTlbIndexMask = 0x0000_1F00;
     private const uint Mpc8xxValidBit = 0x0000_0200;
     private const uint Mpc8xxPageSizeMask = 0x0000_000C;
@@ -1405,9 +1406,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private uint ComputeMpc8xxLevelTwoDescriptorPointer()
     {
-        var levelTwoTableBase = _extendedSpr.GetValueOrDefault(Mpc8xxDataTableWalkControlSpr, 0u) & Mpc8xxTableBaseMask;
+        var tableWalkControl = _extendedSpr.GetValueOrDefault(Mpc8xxDataTableWalkControlSpr, 0u);
+        var levelTwoTableBase = tableWalkControl & Mpc8xxTableBaseMask;
         var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
-        var levelTwoIndex = (effectivePageNumber >> 10) & Mpc8xxLevelTwoIndexMask;
+        var pageSizeCode = tableWalkControl & Mpc8xxPageSizeMask;
+        var levelTwoIndexMask = pageSizeCode == Mpc8xxPageSize4Kb
+            ? Mpc8xxLevelTwoIndex4KbMask
+            : Mpc8xxLevelTwoIndexLargePageMask;
+        var levelTwoIndex = (effectivePageNumber >> 10) & levelTwoIndexMask;
         return levelTwoTableBase | levelTwoIndex;
     }
 
@@ -1533,7 +1539,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
             var translatedPageBase = entry.Value.RealPageNumber & pageBaseMask;
 
-            if ((translatedPageBase & 0x8000_0000u) == 0 &&
+            if (pageSize == 8u * 1024u * 1024u &&
+                (translatedPageBase & 0x8000_0000u) == 0 &&
                 (entry.Value.EffectivePageNumber & 0x8000_0000u) != 0)
             {
                 translatedPageBase |= 0x8000_0000u;
