@@ -20,7 +20,7 @@ if (args.Length == 0)
     Console.WriteLine(
         "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
         "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
-        "[--svc-return <service>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--tail-length <count>] [--save-checkpoint <path>] " +
+        "[--svc-return <service>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--count-pc <address>]");
     return 1;
 }
@@ -73,6 +73,11 @@ if (cliOptions.MemoryWriteOverrides.Count > 0)
 if (cliOptions.StopAtProgramCounter.HasValue)
 {
     Console.WriteLine($"StopAtProgramCounter: 0x{cliOptions.StopAtProgramCounter.Value:X8}");
+}
+
+if (cliOptions.StopOnSupervisorService.HasValue)
+{
+    Console.WriteLine($"StopOnSupervisorService: 0x{cliOptions.StopOnSupervisorService.Value:X8}");
 }
 
 if (cliOptions.TailLength != DefaultTailLength)
@@ -165,6 +170,7 @@ try
     ApplyRegisterOverrides(state.CpuCore, registerOverrides);
 
     PowerPcTracingSupervisorCallHandler? supervisorTracer = null;
+    StopOnSupervisorServicePowerPcSupervisorCallHandler? stopOnSupervisorServiceHandler = null;
     var powerPcCore = state.CpuCore as PowerPc32CpuCore;
 
     if (powerPcCore is not null)
@@ -177,7 +183,17 @@ try
         }
 
         supervisorTracer = new PowerPcTracingSupervisorCallHandler(powerPcCore.SupervisorCallHandler);
-        powerPcCore.SupervisorCallHandler = supervisorTracer;
+        IPowerPcSupervisorCallHandler activeSupervisorHandler = supervisorTracer;
+
+        if (cliOptions.StopOnSupervisorService.HasValue)
+        {
+            stopOnSupervisorServiceHandler = new StopOnSupervisorServicePowerPcSupervisorCallHandler(
+                activeSupervisorHandler,
+                cliOptions.StopOnSupervisorService.Value);
+            activeSupervisorHandler = stopOnSupervisorServiceHandler;
+        }
+
+        powerPcCore.SupervisorCallHandler = activeSupervisorHandler;
     }
 
     var timelineExecuted = 0L;
@@ -248,6 +264,12 @@ try
     if (cliOptions.StopAtProgramCounter.HasValue)
     {
         Console.WriteLine($"StopAtProgramCounterReached: {traceRun.StopPointReached}");
+    }
+
+    if (cliOptions.StopOnSupervisorService.HasValue)
+    {
+        Console.WriteLine(
+            $"StopOnSupervisorServiceReached: {stopOnSupervisorServiceHandler?.StopReached ?? false}");
     }
 
     Console.WriteLine($"Halted: {state.Machine.Halted}");
@@ -509,6 +531,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var checkpointForceRebuild = false;
     var chunkBudget = DefaultChunkBudget;
     uint? stopAtProgramCounter = null;
+    uint? stopOnSupervisorService = null;
     var tailLength = DefaultTailLength;
     var supervisorReturnOverrides = new Dictionary<uint, uint>();
     var memoryWriteOverrides = new Dictionary<uint, uint>();
@@ -572,6 +595,10 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 stopAtProgramCounter = ParseUInt32Flexible(optionValue);
                 break;
+            case "--stop-on-svc":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                stopOnSupervisorService = ParseUInt32Flexible(optionValue);
+                break;
             case "--tail-length":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 tailLength = ParseNonNegativeIntOption(optionName, optionValue);
@@ -600,6 +627,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         checkpointForceRebuild,
         chunkBudget,
         stopAtProgramCounter,
+        stopOnSupervisorService,
         tailLength,
         supervisorReturnOverrides,
         memoryWriteOverrides,
@@ -968,6 +996,7 @@ static TracedRunResult RunBudgetWithTrace(
         executed,
         tail?.ToArray() ?? Array.Empty<uint>(),
         stopPointReached,
+        StopOnSupervisorServiceReached: false,
         memoryWatchEvents?.ToArray() ?? Array.Empty<MemoryWatchTraceEntry>());
 }
 
@@ -1546,6 +1575,7 @@ file sealed record ProbeCliOptions(
     bool CheckpointForceRebuild,
     int ChunkBudget,
     uint? StopAtProgramCounter,
+    uint? StopOnSupervisorService,
     int TailLength,
     IReadOnlyDictionary<uint, uint> SupervisorReturnOverrides,
     IReadOnlyDictionary<uint, uint> MemoryWriteOverrides,
@@ -1558,12 +1588,42 @@ file sealed record TracedRunResult(
     long ExecutedInstructions,
     IReadOnlyList<uint> ProgramCounterTail,
     bool StopPointReached,
+    bool StopOnSupervisorServiceReached,
     IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents);
 
 file sealed record InstructionWindowRequest(
     uint Address,
     int Before,
     int After);
+
+file sealed class StopOnSupervisorServicePowerPcSupervisorCallHandler : IPowerPcSupervisorCallHandler
+{
+    private readonly IPowerPcSupervisorCallHandler _inner;
+    private readonly uint _serviceCode;
+
+    public StopOnSupervisorServicePowerPcSupervisorCallHandler(
+        IPowerPcSupervisorCallHandler inner,
+        uint serviceCode)
+    {
+        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        _serviceCode = serviceCode;
+    }
+
+    public bool StopReached { get; private set; }
+
+    public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
+    {
+        var result = _inner.Handle(context);
+
+        if (context.ServiceCode != _serviceCode)
+        {
+            return result;
+        }
+
+        StopReached = true;
+        return result with { Halt = true };
+    }
+}
 
 file sealed class OverrideReturnPowerPcSupervisorCallHandler : IPowerPcSupervisorCallHandler
 {
