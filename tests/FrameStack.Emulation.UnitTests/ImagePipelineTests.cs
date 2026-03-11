@@ -177,7 +177,7 @@ public sealed class ImagePipelineTests
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
         Assert.Equal(2, summary.ExecutedInstructions);
-        Assert.Equal(256u * 1024u * 1024u, powerPc.Registers[3]);
+        Assert.Equal(0x0A80_0000u, powerPc.Registers[3]);
     }
 
     [Fact]

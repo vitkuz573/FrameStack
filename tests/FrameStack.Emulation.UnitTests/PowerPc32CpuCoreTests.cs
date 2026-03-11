@@ -210,6 +210,33 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void ReadSpecialPurposeRegisterMtwbShouldUseControlRegisterIndexBitsWhenPresent()
+    {
+        var cpu = new PowerPc32CpuCore();
+
+        cpu.WriteSpecialPurposeRegister(796, 0x0345_0000); // M_TWB base
+        cpu.WriteSpecialPurposeRegister(792, 0x1600_1F00); // MD_CTR with slot index 31
+
+        var descriptorPointer = cpu.ReadSpecialPurposeRegister(796);
+
+        Assert.Equal(0x0345_007Cu, descriptorPointer);
+    }
+
+    [Fact]
+    public void ReadSpecialPurposeRegisterMtwbShouldKeepSlotZeroWhenControlRegisterInitialized()
+    {
+        var cpu = new PowerPc32CpuCore();
+
+        cpu.WriteSpecialPurposeRegister(796, 0x0345_0000); // M_TWB base
+        cpu.WriteSpecialPurposeRegister(795, 0x8F00_0200); // MD_EPN
+        cpu.WriteSpecialPurposeRegister(792, 0x1600_0000); // MD_CTR slot index 0
+
+        var descriptorPointer = cpu.ReadSpecialPurposeRegister(796);
+
+        Assert.Equal(0x0345_0000u, descriptorPointer);
+    }
+
+    [Fact]
     public void MfsprMdTwcShouldReturnLevelTwoDescriptorPointerForCurrentEpn()
     {
         var cpu = new PowerPc32CpuCore();

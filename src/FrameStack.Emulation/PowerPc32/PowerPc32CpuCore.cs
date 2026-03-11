@@ -41,6 +41,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private readonly Dictionary<uint, long> _supervisorCallCounters = new();
     private uint _machineStateRegister;
     private ulong _timeBaseCounter;
+    private int _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
 
     public PowerPc32CpuCore()
         : this(new DefaultPowerPcSupervisorCallHandler())
@@ -150,6 +151,19 @@ public sealed class PowerPc32CpuCore : ICpuCore
         if (_extendedSpr.TryGetValue(Mpc8xxDataRealPageNumberSpr, out var dataRpn))
         {
             InstallDataTlbEntry(dataRpn);
+        }
+
+        if (_extendedSpr.ContainsKey(Mpc8xxDataControlSpr))
+        {
+            _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
+        }
+        else if (_extendedSpr.ContainsKey(Mpc8xxInstructionControlSpr))
+        {
+            _lastMpc8xxControlSpr = Mpc8xxInstructionControlSpr;
+        }
+        else
+        {
+            _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
         }
 
         _supervisorCallCounters.Clear();
@@ -1333,9 +1347,20 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private uint ComputeMpc8xxLevelOneDescriptorPointer()
     {
         var tableBase = _extendedSpr.GetValueOrDefault(Mpc8xxTableWalkBaseSpr, 0u) & Mpc8xxTableBaseMask;
-        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
-        var levelOneIndex = (effectivePageNumber >> 20) & Mpc8xxLevelOneIndexMask;
+        var levelOneIndex = ResolveMpc8xxLevelOneIndex();
         return tableBase | levelOneIndex;
+    }
+
+    private uint ResolveMpc8xxLevelOneIndex()
+    {
+        if (_extendedSpr.TryGetValue(_lastMpc8xxControlSpr, out var controlValue))
+        {
+            // PPC MB/ME bit numbering stores the 5-bit TLB slot in bits 8..12.
+            return ((controlValue >> 8) & 0x1Fu) << 2;
+        }
+
+        var effectivePageNumber = GetMpc8xxTableWalkEffectivePageNumber();
+        return (effectivePageNumber >> 20) & Mpc8xxLevelOneIndexMask;
     }
 
     private uint ComputeMpc8xxLevelTwoDescriptorPointer()
@@ -1377,6 +1402,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 break;
             case CounterRegisterSpr:
                 _registers.Ctr = value;
+                break;
+            case Mpc8xxInstructionControlSpr:
+                _extendedSpr[spr] = value;
+                _lastMpc8xxControlSpr = spr;
+                break;
+            case Mpc8xxDataControlSpr:
+                _extendedSpr[spr] = value;
+                _lastMpc8xxControlSpr = spr;
                 break;
             case Mpc8xxInstructionRealPageNumberSpr:
                 _extendedSpr[spr] = value;
