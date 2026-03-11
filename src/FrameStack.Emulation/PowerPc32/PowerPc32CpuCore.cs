@@ -36,9 +36,26 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     public uint MachineStateRegister => _machineStateRegister;
 
+    public IReadOnlyDictionary<int, uint> ExtendedSpecialPurposeRegisters => _extendedSpr;
+
     public IReadOnlyDictionary<uint, long> SupervisorCallCounters => _supervisorCallCounters;
 
     public IPowerPcSupervisorCallHandler SupervisorCallHandler { get; set; }
+
+    public uint ReadSpecialPurposeRegister(int spr)
+    {
+        return ReadSpr(spr);
+    }
+
+    public void WriteSpecialPurposeRegister(int spr, uint value)
+    {
+        WriteSpr(spr, value);
+    }
+
+    public void WriteMachineStateRegister(uint value)
+    {
+        _machineStateRegister = value;
+    }
 
     public void Reset(uint entryPoint)
     {

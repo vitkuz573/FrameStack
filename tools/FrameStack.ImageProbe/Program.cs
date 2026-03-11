@@ -20,7 +20,7 @@ if (args.Length == 0)
         "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
         "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--chunk-budget <instructions>] " +
         "[--svc-return <service>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--tail-length <count>] [--save-checkpoint <path>] " +
-        "[--window <address>:<before>:<after>] [--watch32 <address>]");
+        "[--window <address>:<before>:<after>] [--watch32 <address>] [--count-pc <address>]");
     return 1;
 }
 
@@ -89,6 +89,12 @@ if (cliOptions.WatchWordAddresses.Count > 0)
 {
     Console.WriteLine(
         $"Watch32: {string.Join(", ", cliOptions.WatchWordAddresses.Select(address => $"0x{address:X8}"))}");
+}
+
+if (cliOptions.TrackedProgramCounters.Count > 0)
+{
+    Console.WriteLine(
+        $"CountPc: {string.Join(", ", cliOptions.TrackedProgramCounters.Select(address => $"0x{address:X8}"))}");
 }
 
 if (cliOptions.CheckpointFilePath is not null)
@@ -286,6 +292,7 @@ try
             $"R27=0x{powerPcCore.Registers[27]:X8} R29=0x{powerPcCore.Registers[29]:X8} R30=0x{powerPcCore.Registers[30]:X8} " +
             $"R31=0x{powerPcCore.Registers[31]:X8} LR=0x{powerPcCore.Registers.Lr:X8} CTR=0x{powerPcCore.Registers.Ctr:X8} " +
             $"CR=0x{powerPcCore.Registers.Cr:X8} XER=0x{powerPcCore.Registers.Xer:X8} MSR=0x{powerPcCore.MachineStateRegister:X8}");
+        PrintSpecialPurposeRegisters(powerPcCore);
     }
 
     PrintFirmwareGlobals(state.Machine);
@@ -309,6 +316,24 @@ try
 
         Console.WriteLine(
             $"  PC=0x{hotSpot.Key:X8} Hits={hotSpot.Value} INSN=0x{instructionWord:X8} OPCODE=0x{majorOpcode:X2} SRC={source}");
+    }
+
+    if (cliOptions.TrackedProgramCounters.Count > 0)
+    {
+        Console.WriteLine("TrackedProgramCounterHits:");
+
+        foreach (var trackedPc in cliOptions.TrackedProgramCounters.Distinct().OrderBy(address => address))
+        {
+            hotSpotCounters.TryGetValue(trackedPc, out var hits);
+            var mapped = TryReadWordAtVirtualAddress(inspection.Sections, imageBytes, trackedPc, out var instructionWordFromImage);
+            var instructionWord = mapped
+                ? instructionWordFromImage
+                : state.Machine.ReadUInt32(trackedPc);
+            var source = mapped ? "image" : "memory";
+
+            Console.WriteLine(
+                $"  PC=0x{trackedPc:X8} Hits={hits} INSN=0x{instructionWord:X8} SRC={source} {DescribeInstruction(trackedPc, instructionWord)}");
+        }
     }
 
     Console.WriteLine("InstructionWindows:");
@@ -490,6 +515,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var memoryWriteOverrides = new Dictionary<uint, uint>();
     var additionalInstructionWindows = new List<InstructionWindowRequest>();
     var watchWordAddresses = new List<uint>();
+    var trackedProgramCounters = new List<uint>();
     var registerOverrideTokens = new List<string>();
 
     for (var index = 0; index < tokens.Length; index++)
@@ -559,6 +585,10 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 watchWordAddresses.Add(ParseUInt32Flexible(optionValue));
                 break;
+            case "--count-pc":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                trackedProgramCounters.Add(ParseUInt32Flexible(optionValue));
+                break;
             default:
                 throw new ArgumentException($"Unsupported option '{optionName}'.");
         }
@@ -576,6 +606,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         memoryWriteOverrides,
         additionalInstructionWindows,
         watchWordAddresses,
+        trackedProgramCounters,
         registerOverrideTokens.ToArray());
 }
 
@@ -733,9 +764,24 @@ static void ApplyRegisterOverrides(
             continue;
         }
 
+        if (name.Equals("msr", StringComparison.OrdinalIgnoreCase))
+        {
+            powerPc.WriteMachineStateRegister(value);
+            continue;
+        }
+
         if (name.Equals("pc", StringComparison.OrdinalIgnoreCase))
         {
             powerPc.Registers.Pc = value;
+            continue;
+        }
+
+        if (name.Length >= 4 &&
+            name.StartsWith("spr", StringComparison.OrdinalIgnoreCase) &&
+            int.TryParse(name[3..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var spr) &&
+            spr is >= 0 and <= 4095)
+        {
+            powerPc.WriteSpecialPurposeRegister(spr, value);
             continue;
         }
 
@@ -1224,6 +1270,32 @@ static string DescribeConditionalBranch(uint programCounter, uint instructionWor
     return $"bc bo={bo} bi={bi} target=0x{target:X8} {(absolute ? "abs" : "rel")}{(link ? " lk" : string.Empty)}";
 }
 
+static void PrintSpecialPurposeRegisters(PowerPc32CpuCore powerPcCore)
+{
+    var nonZeroSpr = powerPcCore.ExtendedSpecialPurposeRegisters
+        .Where(entry => entry.Value != 0)
+        .OrderBy(entry => entry.Key)
+        .ToArray();
+
+    if (nonZeroSpr.Length == 0)
+    {
+        return;
+    }
+
+    const int maxEntries = 24;
+    Console.WriteLine("SpecialPurposeRegisters:");
+
+    foreach (var (spr, value) in nonZeroSpr.Take(maxEntries))
+    {
+        Console.WriteLine($"  SPR[{spr}]=0x{value:X8}");
+    }
+
+    if (nonZeroSpr.Length > maxEntries)
+    {
+        Console.WriteLine($"  ... {nonZeroSpr.Length - maxEntries} more non-zero SPR entries");
+    }
+}
+
 static void PrintFirmwareGlobals(EmulationMachine machine)
 {
     // Cisco ROM monitor global workspace in this image.
@@ -1355,6 +1427,7 @@ file sealed record ProbeCliOptions(
     IReadOnlyDictionary<uint, uint> MemoryWriteOverrides,
     IReadOnlyList<InstructionWindowRequest> AdditionalInstructionWindows,
     IReadOnlyList<uint> WatchWordAddresses,
+    IReadOnlyList<uint> TrackedProgramCounters,
     string[] RegisterOverrideTokens);
 
 file sealed record TracedRunResult(
