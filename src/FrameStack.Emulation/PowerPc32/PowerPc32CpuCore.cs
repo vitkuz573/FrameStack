@@ -18,14 +18,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private const uint Mpc8xxTableBaseMask = 0xFFFF_F000;
     private const uint Mpc8xxLevelOneIndexMask = 0x0000_0FFC;
-    private const uint Mpc8xxLevelTwoIndexMask = 0x0000_0FFC;
+    private const uint Mpc8xxLevelTwoIndexMask = 0xFFFF_FE00;
     private const uint Mpc8xxTlbIndexMask = 0x0000_1F00;
     private const uint Mpc8xxValidBit = 0x0000_0200;
-    private const uint Mpc8xxPageSizeMask = 0x0000_0C00;
+    private const uint Mpc8xxPageSizeMask = 0x0000_000C;
     private const uint Mpc8xxPageSize4Kb = 0x0000_0000;
-    private const uint Mpc8xxPageSize512Kb = 0x0000_0800;
-    private const uint Mpc8xxPageSize8Mb = 0x0000_0C00;
-    private const uint Mpc8xxPageSize16KbFlag = 0x0000_0001;
+    private const uint Mpc8xxPageSize512Kb = 0x0000_0004;
+    private const uint Mpc8xxPageSize8Mb = 0x0000_000C;
+    private const uint Mpc8xxPageSize16KbFlag = 0x0000_0008;
 
     private const uint DcbzLineSize = 16;
 
@@ -1496,7 +1496,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 continue;
             }
 
-            var pageSize = DecodeMpc8xxPageSize(entry.Value.RealPageNumber);
+            var pageSize = DecodeMpc8xxPageSize(entry.Value.TableWalkControl, entry.Value.RealPageNumber);
             var pageOffsetMask = pageSize - 1;
             var pageBaseMask = ~pageOffsetMask;
 
@@ -1513,9 +1513,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return effectiveAddress;
     }
 
-    private static uint DecodeMpc8xxPageSize(uint realPageNumber)
+    private static uint DecodeMpc8xxPageSize(uint tableWalkControl, uint realPageNumber)
     {
-        var pageSizeCode = realPageNumber & Mpc8xxPageSizeMask;
+        var pageSizeCode = tableWalkControl & Mpc8xxPageSizeMask;
 
         if (pageSizeCode == Mpc8xxPageSize8Mb)
         {
@@ -1562,7 +1562,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 continue;
             }
 
-            var pageSize = DecodeMpc8xxPageSize(entry.Value.RealPageNumber);
+            var pageSize = DecodeMpc8xxPageSize(entry.Value.TableWalkControl, entry.Value.RealPageNumber);
             var pageBaseMask = ~(pageSize - 1);
 
             if ((effectiveAddress & pageBaseMask) != (entry.Value.EffectivePageNumber & pageBaseMask))

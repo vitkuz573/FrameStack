@@ -260,7 +260,7 @@ public sealed class PowerPc32CpuCoreTests
         cpu.ExecuteCycle(memory);
         cpu.ExecuteCycle(memory);
 
-        Assert.Equal(0x0F40_048Cu, cpu.Registers[6]);
+        Assert.Equal(0x0F63_C400u, cpu.Registers[6]);
     }
 
     [Fact]
@@ -519,6 +519,28 @@ public sealed class PowerPc32CpuCoreTests
         }
 
         Assert.Equal(0xDEAD_BEEFu, cpu.Registers[5]);
+    }
+
+    [Fact]
+    public void DataLoadShouldDerivePageSizeFromMpc8xxTableWalkControl()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x1000, 0x80A3_0000); // lwz r5, 0(r3)
+        memory.WriteUInt32(0x0014_0000, 0xCAFE_BABE); // 0x0010_0000 base + 0x0004_0000 offset within 512KB page
+
+        cpu.Reset(0x1000);
+        cpu.WriteMachineStateRegister(0x0000_0010); // Data relocation enabled.
+        cpu.WriteSpecialPurposeRegister(792, 0x0000_0000); // MD_CTR index 0
+        cpu.WriteSpecialPurposeRegister(795, 0x8000_0200); // MD_EPN + valid
+        cpu.WriteSpecialPurposeRegister(797, 0x0000_0004); // MD_TWC page size = 512KB
+        cpu.WriteSpecialPurposeRegister(798, 0x0010_0000); // MD_RPN
+        cpu.Registers[3] = 0x8004_0000; // Effective address in same 512KB page
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xCAFE_BABEu, cpu.Registers[5]);
     }
 
     [Fact]
