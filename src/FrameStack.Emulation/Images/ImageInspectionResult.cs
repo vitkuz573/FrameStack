@@ -6,4 +6,6 @@ public sealed record ImageInspectionResult(
     ImageEndianness Endianness,
     uint EntryPoint,
     IReadOnlyList<ImageSectionDescriptor> Sections,
-    string Summary);
+    string Summary,
+    string? CiscoFamily = null,
+    string? CiscoImageTag = null);

@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace FrameStack.Emulation.Images;
 
 public sealed class BinaryImageAnalyzer : IImageAnalyzer
@@ -6,6 +8,8 @@ public sealed class BinaryImageAnalyzer : IImageAnalyzer
     private const byte ElfMagic1 = (byte)'E';
     private const byte ElfMagic2 = (byte)'L';
     private const byte ElfMagic3 = (byte)'F';
+    private static readonly byte[] CiscoFamilyMarker = "CW_FAMILY$"u8.ToArray();
+    private static readonly byte[] CiscoImageMarker = "CW_IMAGE$"u8.ToArray();
 
     public ImageInspectionResult Analyze(ReadOnlySpan<byte> imageBytes)
     {
@@ -129,13 +133,28 @@ public sealed class BinaryImageAnalyzer : IImageAnalyzer
             summary = $"{summary} ELF machine reports SparcV9, entry signature matches PowerPC32.";
         }
 
+        var ciscoFamily = TryExtractCiscoTagValue(imageBytes, CiscoFamilyMarker);
+        var ciscoImageTag = TryExtractCiscoTagValue(imageBytes, CiscoImageMarker);
+
+        if (ciscoFamily is not null)
+        {
+            summary = $"{summary} Cisco family tag: {ciscoFamily}.";
+        }
+
+        if (ciscoImageTag is not null)
+        {
+            summary = $"{summary} Cisco image tag: {ciscoImageTag}.";
+        }
+
         return new ImageInspectionResult(
             ImageContainerFormat.Elf32,
             architecture,
             endianness,
             entryPoint,
             sections,
-            summary);
+            summary,
+            ciscoFamily,
+            ciscoImageTag);
     }
 
     private static bool TryLooksLikePowerPcEntry(
@@ -210,5 +229,42 @@ public sealed class BinaryImageAnalyzer : IImageAnalyzer
                        bytes[offset + 3]),
             _ => throw new InvalidOperationException("Unknown endianness.")
         };
+    }
+
+    private static string? TryExtractCiscoTagValue(ReadOnlySpan<byte> imageBytes, ReadOnlySpan<byte> marker)
+    {
+        var markerIndex = imageBytes.IndexOf(marker);
+
+        if (markerIndex < 0)
+        {
+            return null;
+        }
+
+        var valueStart = markerIndex + marker.Length;
+        var valueEnd = valueStart;
+
+        while (valueEnd < imageBytes.Length)
+        {
+            var currentByte = imageBytes[valueEnd];
+
+            if (currentByte == (byte)'$' || currentByte == 0)
+            {
+                break;
+            }
+
+            if (currentByte < 0x20 || currentByte > 0x7E)
+            {
+                return null;
+            }
+
+            valueEnd++;
+        }
+
+        if (valueEnd <= valueStart)
+        {
+            return null;
+        }
+
+        return Encoding.ASCII.GetString(imageBytes.Slice(valueStart, valueEnd - valueStart));
     }
 }

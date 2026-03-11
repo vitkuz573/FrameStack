@@ -190,21 +190,18 @@ try
         for (var index = 0; index < timelineSteps; index++)
         {
             var pc = state.Machine.ProgramCounter;
-            var mapped = TryReadWordAtVirtualAddress(inspection.Sections, imageBytes, pc, out var instructionWordFromImage);
-            var instructionWord = mapped
-                ? instructionWordFromImage
-                : state.Machine.ReadUInt32(pc);
+            var (instructionWord, hasImageWord, imageWord) =
+                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, pc);
             var opcode = (instructionWord >> 26).ToString("X2", CultureInfo.InvariantCulture);
-            var instructionDisplay = mapped
-                ? $"0x{instructionWord:X8}"
-                : $"0x{instructionWord:X8} (memory)";
+            var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
-            Console.WriteLine($"  #{index + 1:D4} PC=0x{pc:X8} INSN={instructionDisplay} OPCODE=0x{opcode}");
+            Console.WriteLine(
+                $"  #{index + 1:D4} PC=0x{pc:X8} INSN=0x{instructionWord:X8} OPCODE=0x{opcode} SRC={source}");
 
             if (powerPcCore is not null)
             {
                 Console.WriteLine(
-                    $"       R0=0x{powerPcCore.Registers[0]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} " +
+                    $"       R0=0x{powerPcCore.Registers[0]:X8} R1=0x{powerPcCore.Registers[1]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} " +
                     $"R5=0x{powerPcCore.Registers[5]:X8} R9=0x{powerPcCore.Registers[9]:X8} R10=0x{powerPcCore.Registers[10]:X8} " +
                     $"R11=0x{powerPcCore.Registers[11]:X8} R27=0x{powerPcCore.Registers[27]:X8} R30=0x{powerPcCore.Registers[30]:X8} " +
                     $"R31=0x{powerPcCore.Registers[31]:X8} LR=0x{powerPcCore.Registers.Lr:X8} CTR=0x{powerPcCore.Registers.Ctr:X8}");
@@ -262,11 +259,9 @@ try
 
         foreach (var pc in traceRun.ProgramCounterTail)
         {
-            var mapped = TryReadWordAtVirtualAddress(inspection.Sections, imageBytes, pc, out var instructionWordFromImage);
-            var instructionWord = mapped
-                ? instructionWordFromImage
-                : state.Machine.ReadUInt32(pc);
-            var source = mapped ? "img" : "mem";
+            var (instructionWord, hasImageWord, imageWord) =
+                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, pc);
+            var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
             Console.WriteLine(
                 $"  PC=0x{pc:X8} INSN=0x{instructionWord:X8} SRC={source} {DescribeInstruction(pc, instructionWord)}");
@@ -288,7 +283,7 @@ try
     if (powerPcCore is not null)
     {
         Console.WriteLine(
-            $"FinalRegisters: R0=0x{powerPcCore.Registers[0]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
+            $"FinalRegisters: R0=0x{powerPcCore.Registers[0]:X8} R1=0x{powerPcCore.Registers[1]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
             $"R8=0x{powerPcCore.Registers[8]:X8} R9=0x{powerPcCore.Registers[9]:X8} R10=0x{powerPcCore.Registers[10]:X8} " +
             $"R27=0x{powerPcCore.Registers[27]:X8} R29=0x{powerPcCore.Registers[29]:X8} R30=0x{powerPcCore.Registers[30]:X8} " +
             $"R31=0x{powerPcCore.Registers[31]:X8} LR=0x{powerPcCore.Registers.Lr:X8} CTR=0x{powerPcCore.Registers.Ctr:X8} " +
@@ -308,12 +303,10 @@ try
 
     foreach (var hotSpot in topHotSpots)
     {
-        var mapped = TryReadWordAtVirtualAddress(inspection.Sections, imageBytes, hotSpot.Key, out var instructionWordFromImage);
-        var instructionWord = mapped
-            ? instructionWordFromImage
-            : state.Machine.ReadUInt32(hotSpot.Key);
+        var (instructionWord, hasImageWord, imageWord) =
+            ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, hotSpot.Key);
         var majorOpcode = instructionWord >> 26;
-        var source = mapped ? "image" : "memory";
+        var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
         Console.WriteLine(
             $"  PC=0x{hotSpot.Key:X8} Hits={hotSpot.Value} INSN=0x{instructionWord:X8} OPCODE=0x{majorOpcode:X2} SRC={source}");
@@ -326,11 +319,9 @@ try
         foreach (var trackedPc in cliOptions.TrackedProgramCounters.Distinct().OrderBy(address => address))
         {
             hotSpotCounters.TryGetValue(trackedPc, out var hits);
-            var mapped = TryReadWordAtVirtualAddress(inspection.Sections, imageBytes, trackedPc, out var instructionWordFromImage);
-            var instructionWord = mapped
-                ? instructionWordFromImage
-                : state.Machine.ReadUInt32(trackedPc);
-            var source = mapped ? "image" : "memory";
+            var (instructionWord, hasImageWord, imageWord) =
+                ReadInstructionWord(state.Machine, inspection.Sections, imageBytes, trackedPc);
+            var source = FormatInstructionSource(instructionWord, hasImageWord, imageWord);
 
             Console.WriteLine(
                 $"  PC=0x{trackedPc:X8} Hits={hits} INSN=0x{instructionWord:X8} SRC={source} {DescribeInstruction(trackedPc, instructionWord)}");
@@ -1296,16 +1287,40 @@ static void PrintInstructionWindow(
     for (var offset = -before; offset <= after; offset++)
     {
         var address = unchecked((uint)((long)centerAddress + (offset * 4L)));
-        var mapped = TryReadWordAtVirtualAddress(sections, imageBytes, address, out var instructionFromImage);
-        var instruction = mapped
-            ? instructionFromImage
-            : machine.ReadUInt32(address);
-        var source = mapped ? "img" : "mem";
+        var (instruction, hasImageWord, imageWord) = ReadInstructionWord(machine, sections, imageBytes, address);
+        var source = FormatInstructionSource(instruction, hasImageWord, imageWord);
         var marker = offset == 0 ? "=>" : "  ";
         var description = DescribeInstruction(address, instruction);
 
         Console.WriteLine($"  {marker} 0x{address:X8}: 0x{instruction:X8} [{source}] {description}");
     }
+}
+
+static (uint MemoryWord, bool HasImageWord, uint ImageWord) ReadInstructionWord(
+    EmulationMachine machine,
+    IReadOnlyList<ImageSectionDescriptor> sections,
+    byte[] imageBytes,
+    uint virtualAddress)
+{
+    var memoryWord = machine.ReadUInt32(virtualAddress);
+    var hasImageWord = TryReadWordAtVirtualAddress(sections, imageBytes, virtualAddress, out var imageWord);
+
+    return (memoryWord, hasImageWord, imageWord);
+}
+
+static string FormatInstructionSource(
+    uint memoryWord,
+    bool hasImageWord,
+    uint imageWord)
+{
+    if (!hasImageWord)
+    {
+        return "mem-only";
+    }
+
+    return memoryWord == imageWord
+        ? "mem=img"
+        : $"mem!=img(0x{imageWord:X8})";
 }
 
 static string DescribeInstruction(uint programCounter, uint instructionWord)

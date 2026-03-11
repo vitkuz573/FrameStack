@@ -69,7 +69,9 @@ public sealed class RuntimeImageBootstrapper
         throw new NotSupportedException($"No loader registered for image format '{inspection.Format}'.");
     }
 
-    private static FrameStack.Emulation.Abstractions.ICpuCore CreateCpuCore(LoadedImage loadedImage, int memoryMb)
+    private static FrameStack.Emulation.Abstractions.ICpuCore CreateCpuCore(
+        LoadedImage loadedImage,
+        int memoryMb)
     {
         if (loadedImage.Architecture == ImageArchitecture.Mips32 &&
             loadedImage.Endianness == ImageEndianness.BigEndian)
@@ -86,11 +88,17 @@ public sealed class RuntimeImageBootstrapper
         if (loadedImage.Architecture == ImageArchitecture.PowerPc32 &&
             loadedImage.Endianness == ImageEndianness.BigEndian)
         {
-            var reportedMemoryBytes = checked((uint)memoryMb * 1024u * 1024u);
+            var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb);
             return new PowerPc32CpuCore(new DefaultPowerPcSupervisorCallHandler(reportedMemoryBytes));
         }
 
         throw new NotSupportedException(
             $"Unsupported architecture/endian pair: {loadedImage.Architecture}/{loadedImage.Endianness}.");
+    }
+
+    private static uint ResolvePowerPcReportedMemoryBytes(int memoryMb)
+    {
+        const uint oneMb = 1024u * 1024u;
+        return checked((uint)memoryMb * oneMb);
     }
 }
