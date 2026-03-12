@@ -160,7 +160,7 @@ public sealed class RuntimeImageBootstrapper
         }
 
         powerPcCore.Registers[1] = ResolvePowerPcInitialStackPointer(memoryMb, inspection);
-        ApplyCiscoPowerPcBootContext(powerPcCore, inspection);
+        ApplyCiscoPowerPcBootContext(powerPcCore, loadedImage, inspection);
     }
 
     private static uint ResolvePowerPcInitialStackPointer(
@@ -182,8 +182,16 @@ public sealed class RuntimeImageBootstrapper
 
     private static void ApplyCiscoPowerPcBootContext(
         PowerPc32CpuCore powerPcCore,
+        LoadedImage loadedImage,
         ImageInspectionResult inspection)
     {
+        if (!string.IsNullOrWhiteSpace(inspection.CiscoFamily))
+        {
+            // Cisco ROM wrappers transfer control to IOS as a subroutine.
+            // Seeding LR to entrypoint keeps early bootstrap returns away from a null vector.
+            powerPcCore.Registers.Lr = loadedImage.EntryPoint;
+        }
+
         if (!string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
         {
             return;

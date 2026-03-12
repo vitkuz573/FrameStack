@@ -136,6 +136,7 @@ public sealed class ImagePipelineTests
         Assert.Equal(0x80006000u, powerPc.Registers[1]);
         Assert.Equal(1u, powerPc.Registers[3]);
         Assert.Equal(0x8000BD00u, powerPc.Registers[4]);
+        Assert.Equal(0x80008000u, powerPc.Registers.Lr);
     }
 
     [Fact]
@@ -155,6 +156,24 @@ public sealed class ImagePipelineTests
         Assert.Equal(0x07FFF000u, powerPc.Registers[1]);
         Assert.Equal(0u, powerPc.Registers[3]);
         Assert.Equal(0u, powerPc.Registers[4]);
+        Assert.Equal(0x80008000u, powerPc.Registers.Lr);
+    }
+
+    [Fact]
+    public void BootstrapShouldNotSeedLinkRegisterForNonCiscoPowerPcImages()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-no-cisco-boot-context",
+            imageBytes: CreateSparcTaggedPowerPcElf(),
+            memoryMb: 128);
+
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+
+        Assert.Equal(0u, powerPc.Registers.Lr);
     }
 
     [Fact]
