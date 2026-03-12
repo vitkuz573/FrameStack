@@ -173,8 +173,8 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
             address => address switch
             {
                 0x0FF0 => 0x8000_2600u,
-                0x0FEC => 0x8000_2700u,
-                0x0FE8 => 0x1000u, // previous word for 0x0FEC looks like stack back-chain
+                0x100C => 0x8000_2700u,
+                0x1008 => 0x1000u, // previous word for 0x100C looks like a live frame back-chain
                 _ => 0u
             },
             address => address switch
@@ -187,7 +187,38 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
 
         Assert.True(resolved);
         Assert.Equal(0x8000_2700u, resolution.RedirectTarget);
-        Assert.Equal(0x0FECu, resolution.StackAddress);
+        Assert.Equal(0x100Cu, resolution.StackAddress);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldIgnoreStaleFrameChainSlotsBelowStackPointer()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+
+        var resolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address switch
+            {
+                0x0FE8 => 0x1000u,      // stale frame-pointer-like word below SP
+                0x0FEC => 0x8000_8084u, // stale return slot below SP
+                0x0FF0 => 0x8003_462Cu, // viable continuation slot
+                _ => 0u
+            },
+            address => address switch
+            {
+                0x8000_8084 or 0x8000_8088 => 0x4E80_0020u,
+                0x8003_462C or 0x8003_4630 => 0x4E80_0020u,
+                0x8000_8000 or 0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var resolution);
+
+        Assert.True(resolved);
+        Assert.Equal(0x8003_462Cu, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.StackSlot, resolution.Source);
+        Assert.Equal(0x0FF0u, resolution.StackAddress);
     }
 
     [Fact]

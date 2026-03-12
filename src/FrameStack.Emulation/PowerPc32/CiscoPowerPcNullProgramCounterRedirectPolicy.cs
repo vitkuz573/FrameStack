@@ -252,6 +252,15 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
                 continue;
             }
 
+            if (LooksLikeStaleBackChainReturnSlot(
+                    stackPointer,
+                    address,
+                    readDataWord,
+                    readInstructionWord))
+            {
+                continue;
+            }
+
             var score = ComputeStackSlotScore(stackPointer, address, offset, readDataWord);
             TryAddCandidate(
                 candidates,
@@ -261,6 +270,56 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
                 address,
                 score);
         }
+    }
+
+    private static bool LooksLikeStaleBackChainReturnSlot(
+        uint stackPointer,
+        uint stackSlotAddress,
+        Func<uint, uint> readDataWord,
+        Func<uint, uint> readInstructionWord)
+    {
+        if (stackSlotAddress >= stackPointer ||
+            !HasFrameBackChainSignal(stackPointer, stackSlotAddress, readDataWord))
+        {
+            return false;
+        }
+
+        var framePointerCandidate = readDataWord(unchecked(stackSlotAddress - 4));
+
+        if ((framePointerCandidate & 0x3) != 0 ||
+            !IsNearStackPointer(framePointerCandidate, stackPointer))
+        {
+            return false;
+        }
+
+        foreach (var probeOffset in StackFrameReturnProbeOffsets)
+        {
+            var returnSlotAddress = unchecked(framePointerCandidate + (uint)probeOffset);
+
+            if (returnSlotAddress < stackPointer)
+            {
+                continue;
+            }
+
+            var returnAddressCandidate = readDataWord(returnSlotAddress);
+
+            if (IsNearStackPointer(returnAddressCandidate, stackPointer))
+            {
+                continue;
+            }
+
+            if (TryUseCandidate(
+                    returnAddressCandidate,
+                    readInstructionWord,
+                    PowerPcNullProgramCounterRedirectSource.StackSlot,
+                    returnSlotAddress,
+                    out _))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static int ComputeStackSlotScore(
@@ -277,9 +336,13 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         {
             score += 34;
         }
-        else if (stackSlotOffset is -0x14 or 0x14)
+        else if (stackSlotOffset == 0x14)
         {
             score += 24;
+        }
+        else if (stackSlotOffset == -0x14)
+        {
+            score += 4;
         }
         else if (stackSlotOffset is -0x10 or 0x10 or 0x1C)
         {
@@ -288,7 +351,9 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
 
         if (HasFrameBackChainSignal(stackPointer, stackSlotAddress, readDataWord))
         {
-            score += 36;
+            score += stackSlotAddress >= stackPointer
+                ? 36
+                : -12;
         }
 
         return score;
@@ -321,6 +386,14 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         foreach (var probeOffset in StackFrameReturnProbeOffsets)
         {
             var returnSlotAddress = unchecked(stackSlotAddress + (uint)probeOffset);
+
+            // Words below the current SP are often stale remnants from already-popped
+            // frames; treating them as live returns tends to bounce into reset stubs.
+            if (returnSlotAddress < stackPointer)
+            {
+                continue;
+            }
+
             var returnAddressCandidate = readDataWord(returnSlotAddress);
 
             if (IsNearStackPointer(returnAddressCandidate, stackPointer))
@@ -341,6 +414,12 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         foreach (var probeOffset in StackFrameReturnProbeOffsets)
         {
             var returnSlotAddress = unchecked(framePointerCandidate + (uint)probeOffset);
+
+            if (returnSlotAddress < stackPointer)
+            {
+                continue;
+            }
+
             var returnAddressCandidate = readDataWord(returnSlotAddress);
 
             if (IsNearStackPointer(returnAddressCandidate, stackPointer))
