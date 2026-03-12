@@ -60,6 +60,7 @@ Arguments:
   - `--stop-on-svc 0x...`
   - `--stop-on-watch32-change 0x...`
   - `--stop-on-watch32-change-reg rN:<offset>`
+  - `--stop-on-console-repeat "<text>=<count>"`
 - optional trace controls:
   - `--watch32 0x...`
   - `--watch32-reg rN:<offset>`
@@ -71,6 +72,8 @@ Arguments:
   - `--report-json /absolute/path/to/report.json`
   - `--profile cisco-c2600-boot` (aliases: `c2600-ram-probe`, `c2600-boot-probe`)
   - `--checkpoint-file <path>` / `--checkpoint-force-rebuild`
+
+`--stop-on-console-repeat` stops the run when the captured console stream contains the target text at least `<count>` times. When enabled, probe auto-reduces chunk size to improve stop responsiveness.
 
 Probe output includes:
 

@@ -8,4 +8,5 @@ public enum ExecutionStopReason
     StopAtProgramCounter = 3,
     StopAtProgramCounterHit = 4,
     StopOnWatchWordChange = 5,
+    StopOnConsoleRepeat = 6,
 }

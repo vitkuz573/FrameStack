@@ -10,6 +10,7 @@ using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
 
 const int DefaultChunkBudget = 200_000_000;
+const int ConsoleRepeatStopMaxChunkBudget = 20_000_000;
 const int DefaultTailLength = 64;
 const int DefaultMaxHotSpots = 4096;
 const int DefaultMaxMemoryWatchEvents = 1024;
@@ -27,7 +28,8 @@ if (args.Length == 0)
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
         "[--watch32-reg <reg>:<offset>] [--watch32-ea <effective-address>] [--stop-on-watch32-change-reg <reg>:<offset>] [--stop-on-watch32-change-ea <effective-address>] [--global32 <name>=<address>] [--global32-ea <name>=<effective-address>] " +
         "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>] [--max-hotspots <count>] [--full-hotspots] " +
-        "[--progress-every <instructions>] [--report-json <path>] [--profile <name>] [--disable-null-pc-redirect] [--disable-8mb-high-bit-alias]");
+        "[--progress-every <instructions>] [--stop-on-console-repeat <text>=<count>] " +
+        "[--report-json <path>] [--profile <name>] [--disable-null-pc-redirect] [--disable-8mb-high-bit-alias]");
     return 1;
 }
 
@@ -180,6 +182,12 @@ Console.WriteLine(
 if (cliOptions.ProgressEveryInstructions > 0)
 {
     Console.WriteLine($"ProgressEveryInstructions: {cliOptions.ProgressEveryInstructions}");
+}
+
+if (cliOptions.StopOnConsoleRepeatRules.Count > 0)
+{
+    Console.WriteLine(
+        $"StopOnConsoleRepeat: {string.Join(", ", cliOptions.StopOnConsoleRepeatRules.Select(rule => $"'{rule.Text}'={rule.RequiredHits}"))}");
 }
 
 if (cliOptions.CheckpointFilePath is not null)
@@ -374,6 +382,15 @@ try
     }
 
     var remainingBudget = Math.Max(0L, instructionBudget - timelineExecuted);
+    var traceChunkBudget = cliOptions.ChunkBudget;
+
+    if (cliOptions.StopOnConsoleRepeatRules.Count > 0 &&
+        traceChunkBudget > ConsoleRepeatStopMaxChunkBudget)
+    {
+        traceChunkBudget = ConsoleRepeatStopMaxChunkBudget;
+        Console.WriteLine($"ChunkBudgetAdjustedForConsoleRepeat: {traceChunkBudget}");
+    }
+
     var hotSpotCounters = new Dictionary<uint, long>();
     var trackedProgramCounterHits = cliOptions.TrackedProgramCounters
         .Distinct()
@@ -382,7 +399,7 @@ try
     var traceRun = RunBudgetWithTrace(
         state.Machine,
         remainingBudget,
-        cliOptions.ChunkBudget,
+        traceChunkBudget,
         hotSpotCounters,
         trackedProgramCounterHits,
         cliOptions.MaxHotSpots,
@@ -397,6 +414,26 @@ try
         cliOptions.StopOnWatchWordChangeEffectiveAddresses,
         powerPcCore,
         cliOptions.ProgressEveryInstructions,
+        () =>
+        {
+            if (supervisorTracer is null ||
+                cliOptions.StopOnConsoleRepeatRules.Count == 0)
+            {
+                return null;
+            }
+
+            var consoleOutput = supervisorTracer.ConsoleOutput;
+
+            foreach (var rule in cliOptions.StopOnConsoleRepeatRules)
+            {
+                if (CountSubstringOccurrences(consoleOutput, rule.Text) >= rule.RequiredHits)
+                {
+                    return ExecutionStopReason.StopOnConsoleRepeat;
+                }
+            }
+
+            return null;
+        },
         progress =>
         {
             var progressExecutedThisRun = timelineExecuted + progress.ExecutedInstructions;
@@ -468,6 +505,12 @@ try
     {
         Console.WriteLine(
             $"StopOnWatch32ChangeReached: {traceRun.StopReason == ExecutionStopReason.StopOnWatchWordChange}");
+    }
+
+    if (cliOptions.StopOnConsoleRepeatRules.Count > 0)
+    {
+        Console.WriteLine(
+            $"StopOnConsoleRepeatReached: {traceRun.StopReason == ExecutionStopReason.StopOnConsoleRepeat}");
     }
 
     Console.WriteLine($"RunWallClockSeconds: {runStopwatch.Elapsed.TotalSeconds:F3}");
@@ -734,6 +777,7 @@ try
             state,
             traceRun,
             stopOnSupervisorServiceReached,
+            traceRun.StopReason == ExecutionStopReason.StopOnConsoleRepeat,
             topHotSpots,
             trackedProgramCounterHits,
             namedGlobals,
@@ -817,6 +861,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var chunkBudget = DefaultChunkBudget;
     var maxHotSpots = DefaultMaxHotSpots;
     var progressEveryInstructions = 0L;
+    var stopOnConsoleRepeatRules = new List<ConsoleRepeatStopRule>();
     var disableNullProgramCounterRedirect = false;
     var disable8MbHighBitAlias = false;
     uint? stopAtProgramCounter = null;
@@ -894,6 +939,10 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
             case "--progress-every":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
                 progressEveryInstructions = ParsePositiveLongOption(optionName, optionValue);
+                break;
+            case "--stop-on-console-repeat":
+                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
+                AddDistinct(stopOnConsoleRepeatRules, ParseConsoleRepeatStopRule(optionName, optionValue));
                 break;
             case "--report-json":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
@@ -1009,6 +1058,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         chunkBudget,
         maxHotSpots,
         progressEveryInstructions,
+        stopOnConsoleRepeatRules.ToArray(),
         stopAtProgramCounter,
         stopAtProgramCounterHits,
         stopOnSupervisorService,
@@ -1289,6 +1339,32 @@ static (uint ProgramCounter, long RequiredHits) ParseProgramCounterHitStop(strin
     return (programCounter, requiredHits);
 }
 
+static ConsoleRepeatStopRule ParseConsoleRepeatStopRule(string optionName, string token)
+{
+    var separator = token.LastIndexOf('=');
+
+    if (separator <= 0 || separator >= token.Length - 1)
+    {
+        throw new ArgumentException(
+            $"Option '{optionName}' requires '<text>=<count>' format.");
+    }
+
+    var text = token[..separator];
+
+    if (!long.TryParse(
+            token[(separator + 1)..],
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out var requiredHits) ||
+        requiredHits <= 0)
+    {
+        throw new ArgumentException(
+            $"Option '{optionName}' requires a positive hit count.");
+    }
+
+    return new ConsoleRepeatStopRule(text, requiredHits);
+}
+
 static InstructionWindowRequest ParseInstructionWindowRequest(string token)
 {
     var parts = token.Split(':', StringSplitOptions.TrimEntries);
@@ -1559,6 +1635,33 @@ static long RunBudgetWithoutTrace(
     return executed;
 }
 
+static long CountSubstringOccurrences(string source, string needle)
+{
+    if (string.IsNullOrEmpty(source) ||
+        string.IsNullOrEmpty(needle))
+    {
+        return 0;
+    }
+
+    var hits = 0L;
+    var searchIndex = 0;
+
+    while (searchIndex < source.Length)
+    {
+        var foundIndex = source.IndexOf(needle, searchIndex, StringComparison.Ordinal);
+
+        if (foundIndex < 0)
+        {
+            break;
+        }
+
+        hits++;
+        searchIndex = foundIndex + needle.Length;
+    }
+
+    return hits;
+}
+
 static TracedRunResult RunBudgetWithTrace(
     EmulationMachine machine,
     long budget,
@@ -1577,6 +1680,7 @@ static TracedRunResult RunBudgetWithTrace(
     IReadOnlyList<uint> stopOnWatchWordChangeEffectiveAddresses,
     PowerPc32CpuCore? powerPcCore,
     long progressEveryInstructions,
+    Func<ExecutionStopReason?>? stopEvaluator,
     Action<TraceProgress>? progressCallback)
 {
     var executed = 0L;
@@ -1885,6 +1989,18 @@ static TracedRunResult RunBudgetWithTrace(
         MergeTrackedProgramCounterHits(trackedProgramCounterHits, traceSummary.TrackedProgramCounterHits);
         MergeProgramCounterTail(tail, traceSummary.ProgramCounterTail, tailLength);
         MergeMemoryWatchEvents(memoryWatchEvents, traceSummary.MemoryWatchEvents, DefaultMaxMemoryWatchEvents);
+
+        if (stopEvaluator is not null)
+        {
+            var evaluatedStopReason = stopEvaluator();
+
+            if (evaluatedStopReason.HasValue &&
+                evaluatedStopReason.Value != ExecutionStopReason.None)
+            {
+                stopReason = evaluatedStopReason.Value;
+                break;
+            }
+        }
 
         if (progressEveryInstructions > 0 &&
             progressCallback is not null &&
@@ -3175,6 +3291,7 @@ static ProbeRunReport CreateProbeReport(
     RuntimeSessionState state,
     TracedRunResult traceRun,
     bool stopOnSupervisorServiceReached,
+    bool stopOnConsoleRepeatReached,
     IReadOnlyList<KeyValuePair<uint, long>> topHotSpots,
     IReadOnlyDictionary<uint, long> trackedProgramCounterHits,
     IReadOnlyDictionary<string, uint> namedGlobals,
@@ -3290,6 +3407,7 @@ static ProbeRunReport CreateProbeReport(
         traceRun.StopReason == ExecutionStopReason.StopAtProgramCounterHit,
         traceRun.StopReason == ExecutionStopReason.StopOnWatchWordChange,
         stopOnSupervisorServiceReached,
+        stopOnConsoleRepeatReached,
         profileNames.ToArray(),
         nullProgramCounterRedirectCount,
         nullProgramCounterRedirectSourceCounts,
@@ -3318,6 +3436,10 @@ static void SaveProbeReport(string reportJsonPath, ProbeRunReport report)
     File.WriteAllText(reportJsonPath, json);
 }
 
+file sealed record ConsoleRepeatStopRule(
+    string Text,
+    long RequiredHits);
+
 file sealed record ProbeCliOptions(
     string? CheckpointFilePath,
     string? SaveCheckpointFilePath,
@@ -3328,6 +3450,7 @@ file sealed record ProbeCliOptions(
     int ChunkBudget,
     int MaxHotSpots,
     long ProgressEveryInstructions,
+    IReadOnlyList<ConsoleRepeatStopRule> StopOnConsoleRepeatRules,
     uint? StopAtProgramCounter,
     IReadOnlyDictionary<uint, long> StopAtProgramCounterHits,
     uint? StopOnSupervisorService,
@@ -3390,6 +3513,7 @@ file sealed record ProbeRunReport(
     bool StopAtProgramCounterHitReached,
     bool StopOnWatch32ChangeReached,
     bool StopOnSupervisorServiceReached,
+    bool StopOnConsoleRepeatReached,
     IReadOnlyList<string> Profiles,
     long NullProgramCounterRedirectCount,
     IReadOnlyDictionary<string, long> NullProgramCounterRedirectSources,
