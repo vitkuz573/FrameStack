@@ -64,6 +64,7 @@ Arguments:
   - `--stop-at-pc-hit 0x...=<hit-count>`
   - `--stop-on-svc 0x...`
   - `--stop-on-svc-signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>`
+  - `--stop-on-svc-signature-hit <service>@<caller>/<a0>/<a1>/<a2>/<a3>#<hit-count>`
   - `--stop-on-watch32-change 0x...`
   - `--stop-on-watch32-change-reg rN:<offset>`
   - `--stop-on-console-repeat "<text>=<count>"`
@@ -81,7 +82,7 @@ Arguments:
   - `--window 0x...:<before>:<after>`
   - `--progress-every <instructions>`
   - `--report-json /absolute/path/to/report.json`
-  - `--profile cisco-c2600-boot` (aliases: `c2600-ram-probe`, `c2600-boot-probe`)
+  - `--profile cisco-c2600-boot`
   - `--checkpoint-file <path>` / `--checkpoint-force-rebuild`
   - `--svc-return-signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>=<value>`
 

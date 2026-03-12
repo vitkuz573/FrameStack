@@ -107,6 +107,12 @@ if (cliOptions.StopOnSupervisorSignatures.Count > 0)
         $"StopOnSupervisorSignatures: {string.Join(", ", cliOptions.StopOnSupervisorSignatures.OrderBy(key => key.ServiceCode).ThenBy(key => key.CallerProgramCounter).ThenBy(key => key.Argument0).ThenBy(key => key.Argument1).ThenBy(key => key.Argument2).ThenBy(key => key.Argument3).Select(key => $"0x{key.ServiceCode:X8}@0x{key.CallerProgramCounter:X8}/0x{key.Argument0:X8}/0x{key.Argument1:X8}/0x{key.Argument2:X8}/0x{key.Argument3:X8}"))}");
 }
 
+if (cliOptions.StopOnSupervisorSignatureHits.Count > 0)
+{
+    Console.WriteLine(
+        $"StopOnSupervisorSignatureHits: {string.Join(", ", cliOptions.StopOnSupervisorSignatureHits.OrderBy(pair => pair.Key.ServiceCode).ThenBy(pair => pair.Key.CallerProgramCounter).ThenBy(pair => pair.Key.Argument0).ThenBy(pair => pair.Key.Argument1).ThenBy(pair => pair.Key.Argument2).ThenBy(pair => pair.Key.Argument3).Select(pair => $"0x{pair.Key.ServiceCode:X8}@0x{pair.Key.CallerProgramCounter:X8}/0x{pair.Key.Argument0:X8}/0x{pair.Key.Argument1:X8}/0x{pair.Key.Argument2:X8}/0x{pair.Key.Argument3:X8}#{pair.Value.ToString(CultureInfo.InvariantCulture)}"))}");
+}
+
 if (cliOptions.TailLength != DefaultTailLength)
 {
     Console.WriteLine($"TailLength: {cliOptions.TailLength}");
@@ -312,6 +318,7 @@ try
     PowerPcTracingSupervisorCallHandler? supervisorTracer = null;
     StopOnSupervisorServicePowerPcSupervisorCallHandler? stopOnSupervisorServiceHandler = null;
     StopOnSupervisorSignaturePowerPcSupervisorCallHandler? stopOnSupervisorSignatureHandler = null;
+    StopOnSupervisorSignatureHitPowerPcSupervisorCallHandler? stopOnSupervisorSignatureHitHandler = null;
     var powerPcCore = state.CpuCore as PowerPc32CpuCore;
 
     if (powerPcCore is null &&
@@ -367,6 +374,14 @@ try
                 activeSupervisorHandler,
                 cliOptions.StopOnSupervisorSignatures);
             activeSupervisorHandler = stopOnSupervisorSignatureHandler;
+        }
+
+        if (cliOptions.StopOnSupervisorSignatureHits.Count > 0)
+        {
+            stopOnSupervisorSignatureHitHandler = new StopOnSupervisorSignatureHitPowerPcSupervisorCallHandler(
+                activeSupervisorHandler,
+                cliOptions.StopOnSupervisorSignatureHits);
+            activeSupervisorHandler = stopOnSupervisorSignatureHitHandler;
         }
 
         powerPcCore.SupervisorCallHandler = activeSupervisorHandler;
@@ -536,6 +551,9 @@ try
 
     var stopOnSupervisorServiceReached = stopOnSupervisorServiceHandler?.StopReached ?? false;
     var stopOnSupervisorSignatureReached = stopOnSupervisorSignatureHandler?.StopReached ?? false;
+    var stopOnSupervisorSignatureHitReached = stopOnSupervisorSignatureHitHandler?.StopReached ?? false;
+    var stopOnSupervisorSignatureHitMatched = stopOnSupervisorSignatureHitHandler?.MatchedSignature;
+    var stopOnSupervisorSignatureHitMatchedCount = stopOnSupervisorSignatureHitHandler?.MatchedHitCount;
 
     if (cliOptions.StopOnSupervisorService.HasValue)
     {
@@ -545,6 +563,20 @@ try
     if (cliOptions.StopOnSupervisorSignatures.Count > 0)
     {
         Console.WriteLine($"StopOnSupervisorSignatureReached: {stopOnSupervisorSignatureReached}");
+    }
+
+    if (cliOptions.StopOnSupervisorSignatureHits.Count > 0)
+    {
+        Console.WriteLine($"StopOnSupervisorSignatureHitReached: {stopOnSupervisorSignatureHitReached}");
+
+        if (stopOnSupervisorSignatureHitReached &&
+            stopOnSupervisorSignatureHitMatched.HasValue &&
+            stopOnSupervisorSignatureHitMatchedCount.HasValue)
+        {
+            var key = stopOnSupervisorSignatureHitMatched.Value;
+            Console.WriteLine(
+                $"StopOnSupervisorSignatureHitMatched: 0x{key.ServiceCode:X8}@0x{key.CallerProgramCounter:X8}/0x{key.Argument0:X8}/0x{key.Argument1:X8}/0x{key.Argument2:X8}/0x{key.Argument3:X8}#{stopOnSupervisorSignatureHitMatchedCount.Value.ToString(CultureInfo.InvariantCulture)}");
+        }
     }
 
     if (cliOptions.StopOnWatchWordChangeAddresses.Count > 0 ||
@@ -884,6 +916,9 @@ if (powerPcCore is not null)
             traceRun,
             stopOnSupervisorServiceReached,
             stopOnSupervisorSignatureReached,
+            stopOnSupervisorSignatureHitReached,
+            stopOnSupervisorSignatureHitMatched,
+            stopOnSupervisorSignatureHitMatchedCount,
             traceRun.StopReason == ExecutionStopReason.StopOnConsoleRepeat,
             topHotSpots,
             trackedProgramCounterHits,
@@ -3219,6 +3254,9 @@ static ProbeRunReport CreateProbeReport(
     TracedRunResult traceRun,
     bool stopOnSupervisorServiceReached,
     bool stopOnSupervisorSignatureReached,
+    bool stopOnSupervisorSignatureHitReached,
+    SupervisorCallSignatureKey? stopOnSupervisorSignatureHitMatched,
+    int? stopOnSupervisorSignatureHitMatchedCount,
     bool stopOnConsoleRepeatReached,
     IReadOnlyList<KeyValuePair<uint, long>> topHotSpots,
     IReadOnlyDictionary<uint, long> trackedProgramCounterHits,
@@ -3380,6 +3418,11 @@ static ProbeRunReport CreateProbeReport(
         traceRun.StopReason == ExecutionStopReason.StopOnWatchWordChange,
         stopOnSupervisorServiceReached,
         stopOnSupervisorSignatureReached,
+        stopOnSupervisorSignatureHitReached,
+        stopOnSupervisorSignatureHitMatched.HasValue
+            ? $"0x{stopOnSupervisorSignatureHitMatched.Value.ServiceCode:X8}@0x{stopOnSupervisorSignatureHitMatched.Value.CallerProgramCounter:X8}/0x{stopOnSupervisorSignatureHitMatched.Value.Argument0:X8}/0x{stopOnSupervisorSignatureHitMatched.Value.Argument1:X8}/0x{stopOnSupervisorSignatureHitMatched.Value.Argument2:X8}/0x{stopOnSupervisorSignatureHitMatched.Value.Argument3:X8}"
+            : null,
+        stopOnSupervisorSignatureHitMatchedCount,
         stopOnConsoleRepeatReached,
         profileNames.ToArray(),
         nullProgramCounterRedirectCount,
@@ -3435,6 +3478,7 @@ sealed record ProbeCliOptions(
     IReadOnlyDictionary<uint, long> StopAtProgramCounterHits,
     uint? StopOnSupervisorService,
     IReadOnlySet<SupervisorCallSignatureKey> StopOnSupervisorSignatures,
+    IReadOnlyDictionary<SupervisorCallSignatureKey, int> StopOnSupervisorSignatureHits,
     int TailLength,
     IReadOnlyDictionary<uint, uint> SupervisorReturnOverrides,
     IReadOnlyDictionary<SupervisorCallsiteKey, uint> SupervisorReturnCallerOverrides,
@@ -3523,6 +3567,9 @@ sealed record ProbeRunReport(
     bool StopOnWatch32ChangeReached,
     bool StopOnSupervisorServiceReached,
     bool StopOnSupervisorSignatureReached,
+    bool StopOnSupervisorSignatureHitReached,
+    string? StopOnSupervisorSignatureHitMatched,
+    int? StopOnSupervisorSignatureHitMatchedCount,
     bool StopOnConsoleRepeatReached,
     IReadOnlyList<string> Profiles,
     long NullProgramCounterRedirectCount,
@@ -3745,6 +3792,64 @@ file sealed class StopOnSupervisorSignaturePowerPcSupervisorCallHandler : IPower
         }
 
         StopReached = true;
+        return result with { Halt = true };
+    }
+}
+
+file sealed class StopOnSupervisorSignatureHitPowerPcSupervisorCallHandler : IPowerPcSupervisorCallHandler
+{
+    private readonly IPowerPcSupervisorCallHandler _inner;
+    private readonly IReadOnlyDictionary<SupervisorCallSignatureKey, int> _signatureHits;
+    private readonly Dictionary<SupervisorCallSignatureKey, int> _counters = new();
+
+    public StopOnSupervisorSignatureHitPowerPcSupervisorCallHandler(
+        IPowerPcSupervisorCallHandler inner,
+        IReadOnlyDictionary<SupervisorCallSignatureKey, int> signatureHits)
+    {
+        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        _signatureHits = signatureHits ?? throw new ArgumentNullException(nameof(signatureHits));
+    }
+
+    public bool StopReached { get; private set; }
+
+    public SupervisorCallSignatureKey? MatchedSignature { get; private set; }
+
+    public int? MatchedHitCount { get; private set; }
+
+    public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
+    {
+        var result = _inner.Handle(context);
+
+        if (StopReached || _signatureHits.Count == 0)
+        {
+            return result;
+        }
+
+        var signature = new SupervisorCallSignatureKey(
+            context.ServiceCode,
+            context.CallerProgramCounter,
+            context.Argument0,
+            context.Argument1,
+            context.Argument2,
+            context.Argument3);
+
+        if (!_signatureHits.TryGetValue(signature, out var requiredHits))
+        {
+            return result;
+        }
+
+        _counters.TryGetValue(signature, out var currentHits);
+        var nextHits = currentHits + 1;
+        _counters[signature] = nextHits;
+
+        if (nextHits < requiredHits)
+        {
+            return result;
+        }
+
+        StopReached = true;
+        MatchedSignature = signature;
+        MatchedHitCount = nextHits;
         return result with { Halt = true };
     }
 }

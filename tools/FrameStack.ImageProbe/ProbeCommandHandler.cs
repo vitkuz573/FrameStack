@@ -96,6 +96,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.StopAtProgramCounterHits);
         command.Options.Add(CliOptions.StopOnSupervisorService);
         command.Options.Add(CliOptions.StopOnSupervisorSignatures);
+        command.Options.Add(CliOptions.StopOnSupervisorSignatureHits);
         command.Options.Add(CliOptions.TailLength);
         command.Options.Add(CliOptions.AdditionalInstructionWindows);
         command.Options.Add(CliOptions.WatchWordAddresses);
@@ -180,6 +181,12 @@ internal static class ProbeCommandHandler
             AddDistinct(
                 stopOnSupervisorSignatures,
                 ParseSupervisorCallSignatureKey("--stop-on-svc-signature", token));
+        }
+        var stopOnSupervisorSignatureHits = new Dictionary<SupervisorCallSignatureKey, int>();
+        foreach (var token in parseResult.GetValue(CliOptions.StopOnSupervisorSignatureHits) ?? [])
+        {
+            var parsed = ParseSupervisorCallSignatureHitStop("--stop-on-svc-signature-hit", token);
+            stopOnSupervisorSignatureHits[parsed.Signature] = parsed.RequiredHits;
         }
 
         var stopAtProgramCounterHits = new Dictionary<uint, long>();
@@ -349,6 +356,7 @@ internal static class ProbeCommandHandler
             stopAtProgramCounterHits,
             stopOnSupervisorService,
             stopOnSupervisorSignatures,
+            stopOnSupervisorSignatureHits,
             tailLength,
             supervisorReturnOverrides,
             supervisorReturnCallerOverrides,
@@ -388,9 +396,7 @@ internal static class ProbeCommandHandler
         {
             var profileName = profileNameRaw.Trim();
 
-            if (profileName.Equals("c2600-ram-probe", StringComparison.OrdinalIgnoreCase) ||
-                profileName.Equals("c2600-boot-probe", StringComparison.OrdinalIgnoreCase) ||
-                profileName.Equals("cisco-c2600-boot", StringComparison.OrdinalIgnoreCase))
+            if (profileName.Equals("cisco-c2600-boot", StringComparison.OrdinalIgnoreCase))
             {
                 const uint baseGlobal = 0x82F40774;
 
@@ -481,7 +487,7 @@ internal static class ProbeCommandHandler
             }
 
             throw new ArgumentException(
-                $"Unsupported profile '{profileNameRaw}'. Supported profiles: c2600-ram-probe, c2600-boot-probe, cisco-c2600-boot.");
+                $"Unsupported profile '{profileNameRaw}'. Supported profiles: cisco-c2600-boot.");
         }
     }
 
@@ -675,6 +681,32 @@ internal static class ProbeCommandHandler
         var programCounter = ParseUInt32Flexible(token[..separator]);
         var requiredHits = EnsurePositive(optionName, long.Parse(token[(separator + 1)..], CultureInfo.InvariantCulture));
         return (programCounter, requiredHits);
+    }
+
+    private static (SupervisorCallSignatureKey Signature, int RequiredHits) ParseSupervisorCallSignatureHitStop(
+        string optionName,
+        string token)
+    {
+        var separator = token.LastIndexOf('#');
+
+        if (separator <= 0 || separator == token.Length - 1)
+        {
+            throw new ArgumentException(
+                $"Invalid '{optionName}' value '{token}'. Expected format '<service>@<caller>/<a0>/<a1>/<a2>/<a3>#<hit-count>'.");
+        }
+
+        var signatureToken = token[..separator];
+        var hitToken = token[(separator + 1)..];
+        var signature = ParseSupervisorCallSignatureKey(optionName, signatureToken);
+        var requiredHits = EnsurePositive(optionName, long.Parse(hitToken, CultureInfo.InvariantCulture));
+
+        if (requiredHits > int.MaxValue)
+        {
+            throw new ArgumentException(
+                $"Option '{optionName}' requires hit count <= {int.MaxValue.ToString(CultureInfo.InvariantCulture)}.");
+        }
+
+        return (signature, (int)requiredHits);
     }
 
     private static ConsoleRepeatStopRule ParseConsoleRepeatStopRule(string optionName, string token)

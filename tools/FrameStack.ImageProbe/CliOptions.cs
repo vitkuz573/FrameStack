@@ -125,6 +125,10 @@ internal static class CliOptions
         "--stop-on-svc-signature",
         "Stop on supervisor signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>.");
 
+    internal static readonly Option<string[]> StopOnSupervisorSignatureHits = CreateManyValueOption(
+        "--stop-on-svc-signature-hit",
+        "Stop on supervisor signature hit <service>@<caller>/<a0>/<a1>/<a2>/<a3>#<hit-count>.");
+
     internal static readonly Option<int?> TailLength = new("--tail-length")
     {
         Description = "Program counter tail length in report.",
