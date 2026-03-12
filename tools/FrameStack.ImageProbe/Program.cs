@@ -101,6 +101,11 @@ if (cliOptions.StopOnSupervisorService.HasValue)
     Console.WriteLine($"StopOnSupervisorService: 0x{cliOptions.StopOnSupervisorService.Value:X8}");
 }
 
+if (cliOptions.SupervisorTraceMaxEvents != 4096)
+{
+    Console.WriteLine($"SupervisorTraceMaxEvents: {cliOptions.SupervisorTraceMaxEvents}");
+}
+
 if (cliOptions.StopOnSupervisorSignatures.Count > 0)
 {
     Console.WriteLine(
@@ -357,7 +362,9 @@ try
                 cliOptions.SupervisorReturnCallerHitOverrides);
         }
 
-        supervisorTracer = new PowerPcTracingSupervisorCallHandler(powerPcCore.SupervisorCallHandler);
+        supervisorTracer = new PowerPcTracingSupervisorCallHandler(
+            powerPcCore.SupervisorCallHandler,
+            cliOptions.SupervisorTraceMaxEvents);
         IPowerPcSupervisorCallHandler activeSupervisorHandler = supervisorTracer;
 
         if (cliOptions.StopOnSupervisorService.HasValue)
@@ -844,6 +851,8 @@ if (powerPcCore is not null)
     if (supervisorTracer is not null &&
         supervisorTracer.CallTrace.Count > 0)
     {
+        Console.WriteLine($"SupervisorTraceCaptured: {supervisorTracer.CallTrace.Count}");
+
         var supervisorCallsites = BuildSupervisorCallsiteCounts(supervisorTracer.CallTrace);
 
         if (supervisorCallsites.Count > 0)
@@ -889,6 +898,11 @@ if (powerPcCore is not null)
                 $"A0=0x{entry.Argument0:X8} A1=0x{entry.Argument1:X8} " +
                 $"A2=0x{entry.Argument2:X8} A3=0x{entry.Argument3:X8} " +
                 $"RET=0x{entry.ReturnValue:X8} HALT={entry.Halt} NEXT={nextPc}");
+        }
+
+        if (supervisorTracer.CallTrace.Count > 40)
+        {
+            Console.WriteLine($"  ... trimmed ({supervisorTracer.CallTrace.Count - 40} more event(s))");
         }
     }
 
@@ -3342,7 +3356,6 @@ static ProbeRunReport CreateProbeReport(
             entry => (long)entry.LongCount(),
             StringComparer.Ordinal);
     var supervisorTrace = supervisorCallTrace
-        .Take(128)
         .Select(entry => new ProbeSupervisorCallTraceReport(
             $"0x{entry.ProgramCounter:X8}",
             $"0x{entry.ServiceCode:X8}",
@@ -3477,6 +3490,7 @@ sealed record ProbeCliOptions(
     uint? StopAtProgramCounter,
     IReadOnlyDictionary<uint, long> StopAtProgramCounterHits,
     uint? StopOnSupervisorService,
+    int SupervisorTraceMaxEvents,
     IReadOnlySet<SupervisorCallSignatureKey> StopOnSupervisorSignatures,
     IReadOnlyDictionary<SupervisorCallSignatureKey, int> StopOnSupervisorSignatureHits,
     int TailLength,

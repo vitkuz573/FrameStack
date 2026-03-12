@@ -121,6 +121,11 @@ internal static class CliOptions
         "--stop-on-svc",
         "Stop when specified supervisor service is called.");
 
+    internal static readonly Option<int?> SupervisorTraceMaxEvents = new("--svc-trace-max")
+    {
+        Description = "Maximum number of supervisor trace events to keep.",
+    };
+
     internal static readonly Option<string[]> StopOnSupervisorSignatures = CreateManyValueOption(
         "--stop-on-svc-signature",
         "Stop on supervisor signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>.");

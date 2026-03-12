@@ -17,6 +17,7 @@ internal static class ProbeCommandHandler
     private const int DefaultMaxHotSpots = 4096;
     private const int DefaultMaxMemoryAccessWatchEvents = 4096;
     private const int DefaultMaxInstructionTraceEvents = 4096;
+    private const int DefaultMaxSupervisorTraceEvents = 4096;
 
     internal static bool TryParse(
         string[] args,
@@ -95,6 +96,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.StopAtProgramCounter);
         command.Options.Add(CliOptions.StopAtProgramCounterHits);
         command.Options.Add(CliOptions.StopOnSupervisorService);
+        command.Options.Add(CliOptions.SupervisorTraceMaxEvents);
         command.Options.Add(CliOptions.StopOnSupervisorSignatures);
         command.Options.Add(CliOptions.StopOnSupervisorSignatureHits);
         command.Options.Add(CliOptions.TailLength);
@@ -175,6 +177,10 @@ internal static class ProbeCommandHandler
             parseResult.GetValue(CliOptions.StopAtProgramCounter));
         var stopOnSupervisorService = ParseOptionalUInt32(
             parseResult.GetValue(CliOptions.StopOnSupervisorService));
+        var supervisorTraceMaxEventsValue = parseResult.GetValue(CliOptions.SupervisorTraceMaxEvents);
+        var supervisorTraceMaxEvents = supervisorTraceMaxEventsValue.HasValue
+            ? EnsureNonNegativeInt("--svc-trace-max", supervisorTraceMaxEventsValue.Value)
+            : DefaultMaxSupervisorTraceEvents;
         var stopOnSupervisorSignatures = new HashSet<SupervisorCallSignatureKey>();
         foreach (var token in parseResult.GetValue(CliOptions.StopOnSupervisorSignatures) ?? [])
         {
@@ -355,6 +361,7 @@ internal static class ProbeCommandHandler
             stopAtProgramCounter,
             stopAtProgramCounterHits,
             stopOnSupervisorService,
+            supervisorTraceMaxEvents,
             stopOnSupervisorSignatures,
             stopOnSupervisorSignatureHits,
             tailLength,

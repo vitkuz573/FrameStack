@@ -63,6 +63,7 @@ Arguments:
   - `--stop-at-pc 0x...`
   - `--stop-at-pc-hit 0x...=<hit-count>`
   - `--stop-on-svc 0x...`
+  - `--svc-trace-max <count>`
   - `--stop-on-svc-signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>`
   - `--stop-on-svc-signature-hit <service>@<caller>/<a0>/<a1>/<a2>/<a3>#<hit-count>`
   - `--stop-on-watch32-change 0x...`

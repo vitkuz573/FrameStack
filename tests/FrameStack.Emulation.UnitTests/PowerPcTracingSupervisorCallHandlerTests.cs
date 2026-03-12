@@ -79,6 +79,30 @@ public sealed class PowerPcTracingSupervisorCallHandlerTests
         Assert.Equal("Hi\n", tracing.ConsoleOutput);
     }
 
+    [Fact]
+    public void HandleShouldRespectConfiguredTraceEntryLimit()
+    {
+        var tracing = new PowerPcTracingSupervisorCallHandler(
+            new StaticHandler(new PowerPcSupervisorCallResult(ReturnValue: 0)),
+            maxTraceEntries: 1);
+
+        tracing.Handle(new PowerPcSupervisorCallContext(0x1000, 0x04, 1, 2, 3, 4, LinkRegister: 0x2008));
+        tracing.Handle(new PowerPcSupervisorCallContext(0x1004, 0x07, 5, 6, 7, 8, LinkRegister: 0x2010));
+
+        var entry = Assert.Single(tracing.CallTrace);
+        Assert.Equal(0x1000u, entry.ProgramCounter);
+        Assert.Equal(0x04u, entry.ServiceCode);
+    }
+
+    [Fact]
+    public void ConstructorShouldRejectNegativeTraceEntryLimit()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new PowerPcTracingSupervisorCallHandler(
+                new StaticHandler(new PowerPcSupervisorCallResult(ReturnValue: 0)),
+                maxTraceEntries: -1));
+    }
+
     private sealed class StaticHandler(PowerPcSupervisorCallResult result) : IPowerPcSupervisorCallHandler
     {
         public int InvocationCount { get; private set; }
