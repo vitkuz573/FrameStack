@@ -14,6 +14,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private const uint MaxIoMemoryProfileValue = 125;
     private const uint IoMemoryProfileOffsetEncodingBase = 100;
     private const uint IoMemoryDescriptorTimingClassWord = 0x0000_8000;
+    private const uint IoMemorySizingProbeBytes = 0x0040_0000;
 
     private readonly uint _reportedMemoryBytes;
     private uint _manualIoMemoryProfilePercent;
@@ -32,6 +33,11 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     {
         if (context.ServiceCode == QueryInstalledRamService)
         {
+            if (IsSmartInitIoMemorySizingQuery(context))
+            {
+                return new PowerPcSupervisorCallResult(ReturnValue: _reportedMemoryBytes);
+            }
+
             if (context.Argument1 == 0 &&
                 context.Argument0 > 0 &&
                 context.Argument0 <= _reportedMemoryBytes)
@@ -75,6 +81,14 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         // Most firmware wrappers expect zero on success.
         // A richer syscall/exception model will replace this default behavior.
         return new PowerPcSupervisorCallResult(ReturnValue: 0);
+    }
+
+    private static bool IsSmartInitIoMemorySizingQuery(PowerPcSupervisorCallContext context)
+    {
+        return context.Argument0 == IoMemorySizingProbeBytes &&
+               context.Argument1 == 0 &&
+               context.Argument3 == 0 &&
+               context.Argument2 >= 0x8000_0000;
     }
 
     private void SeedIoMemoryProfileBlock(PowerPcSupervisorCallContext context)

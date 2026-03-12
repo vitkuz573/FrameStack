@@ -37,6 +37,22 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
     }
 
     [Fact]
+    public void HandleShouldReturnReportedMemoryForSmartInitIoMemorySizingQuery()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler(0x0800_0000);
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x04,
+            Argument0: 0x0040_0000,
+            Argument1: 0,
+            Argument2: 0x8000_5F10,
+            Argument3: 0));
+
+        Assert.Equal(0x0800_0000u, result.ReturnValue);
+    }
+
+    [Fact]
     public void HandleShouldFallbackToReportedMemoryWhenProbeChunkExceedsMemory()
     {
         var handler = new DefaultPowerPcSupervisorCallHandler(0x0800_0000);
