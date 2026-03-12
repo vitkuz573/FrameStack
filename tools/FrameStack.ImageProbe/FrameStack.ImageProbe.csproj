@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\FrameStack.Emulation\FrameStack.Emulation.csproj" />
+    <PackageReference Include="System.CommandLine" />
   </ItemGroup>
 
   <PropertyGroup>

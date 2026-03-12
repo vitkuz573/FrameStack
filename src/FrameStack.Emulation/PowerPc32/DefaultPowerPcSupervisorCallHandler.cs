@@ -14,6 +14,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private const uint MaxIoMemoryProfileValue = 125;
     private const uint IoMemoryProfileOffsetEncodingBase = 100;
     private const uint IoMemoryDescriptorTimingClassWord = 0x0000_8000;
+    private const uint IoMemoryDescriptorAdapterCodeWord = 0x0091_0000;
     private const uint IoMemorySizingProbeBytes = 0x0040_0000;
 
     private readonly uint _reportedMemoryBytes;
@@ -52,7 +53,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
 
         if (context.ServiceCode == BootstrapIoMemoryProfileService)
         {
-            SeedIoMemoryProfileBlock(context);
+            SeedIoMemoryProfileBlock(context, ResolveIoMemoryProfileResponse());
             return new PowerPcSupervisorCallResult(ReturnValue: 0);
         }
 
@@ -60,7 +61,9 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
             context.ServiceCode == ReadIoMemoryProfileService ||
             context.ServiceCode == CommitIoMemoryProfileService)
         {
-            return new PowerPcSupervisorCallResult(ReturnValue: ResolveIoMemoryProfileQueryResponse());
+            var queryResponse = ResolveIoMemoryProfileQueryResponse();
+            SeedIoMemoryProfileBlock(context, queryResponse);
+            return new PowerPcSupervisorCallResult(ReturnValue: queryResponse);
         }
 
         if (context.ServiceCode == SetIoMemoryProfileService ||
@@ -93,7 +96,9 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
                context.Argument2 >= 0x8000_0000;
     }
 
-    private void SeedIoMemoryProfileBlock(PowerPcSupervisorCallContext context)
+    private static void SeedIoMemoryProfileBlock(
+        PowerPcSupervisorCallContext context,
+        uint profileWord)
     {
         if (context.Argument0 == 0)
         {
@@ -102,9 +107,10 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
 
         // Cisco ROM wrappers pass a pointer-sized descriptor in A0.
         // Keeping the leading words deterministic avoids random stale-state reads.
-        context.TryWriteDataUInt32(context.Argument0, ResolveIoMemoryProfileResponse());
+        context.TryWriteDataUInt32(context.Argument0, profileWord);
         context.TryWriteDataUInt32(context.Argument0 + 4, 0);
         context.TryWriteDataUInt32(context.Argument0 + 8, IoMemoryDescriptorTimingClassWord);
+        context.TryWriteDataUInt32(context.Argument0 + 12, IoMemoryDescriptorAdapterCodeWord);
     }
 
     private uint ResolveIoMemoryProfileResponse()

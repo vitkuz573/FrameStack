@@ -1,5 +1,6 @@
 using System.Text;
 using FrameStack.Emulation.Images;
+using FrameStack.Emulation.Memory;
 using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
 
@@ -137,6 +138,7 @@ public sealed class ImagePipelineTests
         Assert.Equal(1u, powerPc.Registers[3]);
         Assert.Equal(0x8000BD00u, powerPc.Registers[4]);
         Assert.Equal(0x80008000u, powerPc.Registers.Lr);
+        Assert.False(powerPc.NullProgramCounterRedirectEnabled);
     }
 
     [Fact]
@@ -157,6 +159,7 @@ public sealed class ImagePipelineTests
         Assert.Equal(0u, powerPc.Registers[3]);
         Assert.Equal(0u, powerPc.Registers[4]);
         Assert.Equal(0x80008000u, powerPc.Registers.Lr);
+        Assert.False(powerPc.NullProgramCounterRedirectEnabled);
     }
 
     [Fact]
@@ -174,6 +177,8 @@ public sealed class ImagePipelineTests
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
         Assert.Equal(0u, powerPc.Registers.Lr);
+        Assert.True(powerPc.NullProgramCounterRedirectEnabled);
+        Assert.Equal(0u, state.Machine.ReadUInt32(0x00000000));
     }
 
     [Fact]
@@ -219,30 +224,32 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
-    public void BootstrapShouldEnableNullProgramCounterRedirectForCiscoPowerPcImages()
+    public void BootstrapShouldInstallCiscoLowVectorEntryStubAndRunFromNullVector()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
             new BinaryImageAnalyzer(),
             [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
 
         var state = bootstrapper.Bootstrap(
-            runtimeHandle: "native-ppc-null-vector-cisco",
+            runtimeHandle: "native-ppc-low-vector-stub-cisco",
             imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
-            memoryMb: 64,
-            cpuInitializer: cpu =>
-            {
-                var powerPc = Assert.IsType<PowerPc32CpuCore>(cpu);
-                powerPc.Registers.Pc = 0;
-                powerPc.Registers[30] = 0x80008000;
-            });
+            memoryMb: 64);
 
-        var summary = state.Machine.Run(instructionBudget: 1);
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+        powerPc.Registers.Pc = 0;
 
-        Assert.Equal(1, summary.ExecutedInstructions);
+        Assert.False(powerPc.NullProgramCounterRedirectEnabled);
+        Assert.Equal(0x3C008000u, state.Machine.ReadUInt32(0x00000000));
+        Assert.Equal(0x60008000u, state.Machine.ReadUInt32(0x00000004));
+        Assert.Equal(0x7C0803A6u, state.Machine.ReadUInt32(0x00000008));
+        Assert.Equal(0x4E800020u, state.Machine.ReadUInt32(0x0000000C));
+
+        var summary = state.Machine.Run(instructionBudget: 4);
+
+        Assert.Equal(4, summary.ExecutedInstructions);
         Assert.False(summary.Halted);
-        Assert.Equal(0x80008004u, summary.FinalProgramCounter);
-        Assert.Equal(0x80008004u, powerPc.ProgramCounter);
+        Assert.Equal(0x80008000u, summary.FinalProgramCounter);
+        Assert.Equal(0x80008000u, powerPc.ProgramCounter);
     }
 
     [Fact]
@@ -261,7 +268,7 @@ public sealed class ImagePipelineTests
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
         Assert.Equal(2, summary.ExecutedInstructions);
-        Assert.Equal(128u * 1024u * 1024u, powerPc.Registers[3]);
+        Assert.Equal(64u * 1024u * 1024u, powerPc.Registers[3]);
     }
 
     [Fact]
@@ -281,6 +288,30 @@ public sealed class ImagePipelineTests
 
         Assert.Equal(2, summary.ExecutedInstructions);
         Assert.Equal(64u * 1024u * 1024u, powerPc.Registers[3]);
+    }
+
+    [Fact]
+    public void BootstrapShouldProtectCiscoC2600IoMemoryDescriptorWrites()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-c2600-iomem-protect",
+            imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
+            memoryMb: 128);
+
+        var memoryBus = Assert.IsType<SparseMemoryBus>(state.Machine.MemoryBus);
+
+        using (memoryBus.BeginPrivilegedWriteScope())
+        {
+            memoryBus.WriteUInt32(0x8336_67E0, 0x1122_3344);
+        }
+
+        memoryBus.WriteUInt32(0x8336_67E0, 0xAABB_CCDD);
+
+        Assert.Equal(0x1122_3344u, memoryBus.ReadUInt32(0x8336_67E0));
     }
 
     [Fact]

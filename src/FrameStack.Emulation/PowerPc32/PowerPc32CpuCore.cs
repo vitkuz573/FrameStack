@@ -86,6 +86,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     public bool PreserveHighBitOn8MbTranslation { get; set; } = true;
 
+    public Action<PowerPcMemoryAccessTraceEntry>? MemoryAccessTraceSink { get; set; }
+
     public IReadOnlyList<PowerPc32TlbEntryState> GetInstructionTlbEntries()
     {
         return CaptureTlbEntries(_instructionTlb);
@@ -457,6 +459,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
             (uint effectiveAddress, out byte value) => TryReadSupervisorByte(memoryBus, effectiveAddress, out value),
             (uint effectiveAddress, byte value) => TryWriteSupervisorByte(memoryBus, effectiveAddress, value));
 
+        using var privilegedWriteScope = (memoryBus as IMemoryWriteProtectionBus)?.BeginPrivilegedWriteScope();
         var result = SupervisorCallHandler.Handle(context);
         _registers[3] = result.ReturnValue;
 
@@ -1763,22 +1766,75 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private uint ReadDataUInt32(IMemoryBus memoryBus, uint effectiveAddress)
     {
-        return memoryBus.ReadUInt32(TranslateDataAddress(effectiveAddress));
+        var translatedAddress = TranslateDataAddress(effectiveAddress);
+        var value = memoryBus.ReadUInt32(translatedAddress);
+        TraceMemoryAccess(
+            PowerPcMemoryAccessType.Read,
+            effectiveAddress,
+            translatedAddress,
+            sizeof(uint),
+            value);
+        return value;
     }
 
     private void WriteDataUInt32(IMemoryBus memoryBus, uint effectiveAddress, uint value)
     {
-        memoryBus.WriteUInt32(TranslateDataAddress(effectiveAddress), value);
+        var translatedAddress = TranslateDataAddress(effectiveAddress);
+        memoryBus.WriteUInt32(translatedAddress, value);
+        TraceMemoryAccess(
+            PowerPcMemoryAccessType.Write,
+            effectiveAddress,
+            translatedAddress,
+            sizeof(uint),
+            value);
     }
 
     private byte ReadDataByte(IMemoryBus memoryBus, uint effectiveAddress)
     {
-        return memoryBus.ReadByte(TranslateDataAddress(effectiveAddress));
+        var translatedAddress = TranslateDataAddress(effectiveAddress);
+        var value = memoryBus.ReadByte(translatedAddress);
+        TraceMemoryAccess(
+            PowerPcMemoryAccessType.Read,
+            effectiveAddress,
+            translatedAddress,
+            sizeof(byte),
+            value);
+        return value;
     }
 
     private void WriteDataByte(IMemoryBus memoryBus, uint effectiveAddress, byte value)
     {
-        memoryBus.WriteByte(TranslateDataAddress(effectiveAddress), value);
+        var translatedAddress = TranslateDataAddress(effectiveAddress);
+        memoryBus.WriteByte(translatedAddress, value);
+        TraceMemoryAccess(
+            PowerPcMemoryAccessType.Write,
+            effectiveAddress,
+            translatedAddress,
+            sizeof(byte),
+            value);
+    }
+
+    private void TraceMemoryAccess(
+        PowerPcMemoryAccessType accessType,
+        uint effectiveAddress,
+        uint physicalAddress,
+        int sizeBytes,
+        uint value)
+    {
+        var traceSink = MemoryAccessTraceSink;
+
+        if (traceSink is null)
+        {
+            return;
+        }
+
+        traceSink(new PowerPcMemoryAccessTraceEntry(
+            _registers.Pc,
+            accessType,
+            effectiveAddress,
+            physicalAddress,
+            sizeBytes,
+            value));
     }
 
     private bool TryReadSupervisorUInt32(IMemoryBus memoryBus, uint effectiveAddress, out uint value)

@@ -225,5 +225,33 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
         Assert.Equal(0u, writes[0x1000]);
         Assert.Equal(0u, writes[0x1004]);
         Assert.Equal(0x0000_8000u, writes[0x1008]);
+        Assert.Equal(0x0091_0000u, writes[0x100C]);
+    }
+
+    [Fact]
+    public void HandleShouldSeedIoMemoryProfileDescriptorForReadService()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler();
+        var writes = new Dictionary<uint, uint>();
+        var writeWord = new PowerPcSupervisorTryWriteUInt32((uint address, uint value) =>
+        {
+            writes[address] = value;
+            return true;
+        });
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3C,
+            Argument0: 0x2000,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0,
+            TryWriteUInt32: writeWord));
+
+        Assert.Equal(120u, result.ReturnValue);
+        Assert.Equal(120u, writes[0x2000]);
+        Assert.Equal(0u, writes[0x2004]);
+        Assert.Equal(0x0000_8000u, writes[0x2008]);
+        Assert.Equal(0x0091_0000u, writes[0x200C]);
     }
 }

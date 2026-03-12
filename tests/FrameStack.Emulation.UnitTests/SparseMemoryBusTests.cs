@@ -35,4 +35,32 @@ public sealed class SparseMemoryBusTests
         var exception = Assert.Throws<InvalidOperationException>(() => bus.RestoreSnapshot(snapshot));
         Assert.Contains("invalid length", exception.Message);
     }
+
+    [Fact]
+    public void WriteShouldBeIgnoredForProtectedRange()
+    {
+        var bus = new SparseMemoryBus(maxMappedBytes: 64 * 1024 * 1024);
+        bus.WriteUInt32(0x2000, 0x1122_3344);
+        bus.ProtectWriteRange(0x2000, 0x10);
+
+        bus.WriteUInt32(0x2000, 0xAABB_CCDD);
+        bus.WriteByte(0x2003, 0xEF);
+
+        Assert.Equal(0x1122_3344u, bus.ReadUInt32(0x2000));
+    }
+
+    [Fact]
+    public void PrivilegedWriteScopeShouldAllowWritesIntoProtectedRange()
+    {
+        var bus = new SparseMemoryBus(maxMappedBytes: 64 * 1024 * 1024);
+        bus.ProtectWriteRange(0x3000, 0x10);
+
+        using (bus.BeginPrivilegedWriteScope())
+        {
+            bus.WriteUInt32(0x3000, 0xDEAD_BEEF);
+            bus.WriteByte(0x3003, 0xAA);
+        }
+
+        Assert.Equal(0xDEAD_BEAAu, bus.ReadUInt32(0x3000));
+    }
 }

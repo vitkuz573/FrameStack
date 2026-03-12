@@ -9,36 +9,25 @@ using FrameStack.Emulation.Memory;
 using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
 
-const int DefaultChunkBudget = 200_000_000;
 const int ConsoleRepeatStopMaxChunkBudget = 20_000_000;
 const int DefaultTailLength = 64;
-const int DefaultMaxHotSpots = 4096;
 const int DefaultMaxMemoryWatchEvents = 1024;
 const long DefaultCheckpointAtInstructions = 2_200_000_000;
 const uint CheckpointMagic = 0x4653_504E; // "FSPN"
 const int CheckpointVersion = 1;
 const int CheckpointPageSize = 4096;
 
-if (args.Length == 0)
+if (!ProbeCommandHandler.TryParse(args, out var cliInvocation, out var cliExitCode))
 {
-    Console.WriteLine(
-        "Usage: dotnet run --project tools/FrameStack.ImageProbe -- <image-path> [instruction-budget] [memory-mb] [timeline-steps] " +
-        "[register=value ...] [--checkpoint-file <path>] [--checkpoint-at <instructions>] [--checkpoint-force-rebuild] [--resume-halted] [--chunk-budget <instructions>] " +
-        "[--svc-return <service>=<value>] [--svc-return-caller <service>@<caller>=<value>] [--svc-return-caller-hit <service>@<caller>#<hit>=<value>] [--poke32 <address>=<value>] [--stop-at-pc <address>] [--stop-on-svc <service>] [--tail-length <count>] [--save-checkpoint <path>] " +
-        "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
-        "[--watch32-reg <reg>:<offset>] [--watch32-ea <effective-address>] [--stop-on-watch32-change-reg <reg>:<offset>] [--stop-on-watch32-change-ea <effective-address>] [--global32 <name>=<address>] [--global32-ea <name>=<effective-address>] " +
-        "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>] [--max-hotspots <count>] [--full-hotspots] " +
-        "[--progress-every <instructions>] [--stop-on-console-repeat <text>=<count>] " +
-        "[--report-json <path>] [--profile <name>] [--disable-null-pc-redirect] [--disable-8mb-high-bit-alias]");
-    return 1;
+    return cliExitCode;
 }
 
-var imagePath = Path.GetFullPath(args[0]);
-var instructionBudget = ParseInstructionBudget(args, 1, 2048);
-var memoryMb = ParseOrDefault(args, 2, 256);
-var timelineSteps = ParseOrDefault(args, 3, 0);
-var cliOptions = ParseProbeCliOptions(args.Skip(4).ToArray());
-var registerOverrides = ParseRegisterOverrides(cliOptions.RegisterOverrideTokens);
+var imagePath = Path.GetFullPath(cliInvocation!.ImagePath);
+var instructionBudget = cliInvocation.InstructionBudget;
+var memoryMb = cliInvocation.MemoryMb;
+var timelineSteps = cliInvocation.TimelineSteps;
+var cliOptions = cliInvocation.CliOptions;
+var registerOverrides = cliInvocation.RegisterOverrides;
 
 if (!File.Exists(imagePath))
 {
@@ -76,6 +65,12 @@ if (cliOptions.SupervisorReturnCallerOverrides.Count > 0)
 {
     Console.WriteLine(
         $"SupervisorCallerOverrides: {string.Join(", ", cliOptions.SupervisorReturnCallerOverrides.OrderBy(pair => pair.Key.ServiceCode).ThenBy(pair => pair.Key.CallerProgramCounter).Select(pair => $"0x{pair.Key.ServiceCode:X8}@0x{pair.Key.CallerProgramCounter:X8}=0x{pair.Value:X8}"))}");
+}
+
+if (cliOptions.SupervisorReturnSignatureOverrides.Count > 0)
+{
+    Console.WriteLine(
+        $"SupervisorSignatureOverrides: {string.Join(", ", cliOptions.SupervisorReturnSignatureOverrides.OrderBy(pair => pair.Key.ServiceCode).ThenBy(pair => pair.Key.CallerProgramCounter).ThenBy(pair => pair.Key.Argument0).ThenBy(pair => pair.Key.Argument1).ThenBy(pair => pair.Key.Argument2).ThenBy(pair => pair.Key.Argument3).Select(pair => $"0x{pair.Key.ServiceCode:X8}@0x{pair.Key.CallerProgramCounter:X8}/0x{pair.Key.Argument0:X8}/0x{pair.Key.Argument1:X8}/0x{pair.Key.Argument2:X8}/0x{pair.Key.Argument3:X8}=0x{pair.Value:X8}"))}");
 }
 
 if (cliOptions.SupervisorReturnCallerHitOverrides.Count > 0)
@@ -151,6 +146,18 @@ if (cliOptions.StopOnWatchWordChangeEffectiveAddresses.Count > 0)
 {
     Console.WriteLine(
         $"StopOnWatch32ChangeEA: {string.Join(", ", cliOptions.StopOnWatchWordChangeEffectiveAddresses.Select(address => $"0x{address:X8}"))}");
+}
+
+if (cliOptions.TraceWatch32Accesses)
+{
+    Console.WriteLine("TraceWatch32Accesses: True");
+    Console.WriteLine($"TraceWatch32AccessesMax: {cliOptions.TraceWatch32AccessesMaxEvents}");
+}
+
+if (cliOptions.TraceWatch32ProgramCounterRanges.Count > 0)
+{
+    Console.WriteLine(
+        $"TraceWatch32PcRange: {string.Join(", ", cliOptions.TraceWatch32ProgramCounterRanges.Select(range => $"0x{range.Start:X8}:0x{range.End:X8}"))}");
 }
 
 if (cliOptions.NamedGlobalAddresses.Count > 0)
@@ -281,6 +288,11 @@ try
         }
     }
 
+    if (EnsureCiscoPowerPcLowVectorEntryStub(state, inspection))
+    {
+        Console.WriteLine("CiscoLowVectorEntryStub: installed.");
+    }
+
     ApplyMemoryOverrides(state.Machine.MemoryBus, cliOptions.MemoryWriteOverrides);
     ApplyRegisterOverrides(state.CpuCore, registerOverrides);
 
@@ -313,12 +325,14 @@ try
 
         if (cliOptions.SupervisorReturnOverrides.Count > 0 ||
             cliOptions.SupervisorReturnCallerOverrides.Count > 0 ||
+            cliOptions.SupervisorReturnSignatureOverrides.Count > 0 ||
             cliOptions.SupervisorReturnCallerHitOverrides.Count > 0)
         {
             powerPcCore.SupervisorCallHandler = new OverrideReturnPowerPcSupervisorCallHandler(
                 powerPcCore.SupervisorCallHandler,
                 cliOptions.SupervisorReturnOverrides,
                 cliOptions.SupervisorReturnCallerOverrides,
+                cliOptions.SupervisorReturnSignatureOverrides,
                 cliOptions.SupervisorReturnCallerHitOverrides);
         }
 
@@ -412,6 +426,9 @@ try
         cliOptions.StopOnWatchWordChangeAddresses,
         cliOptions.DynamicStopOnWatchWordChangeRequests,
         cliOptions.StopOnWatchWordChangeEffectiveAddresses,
+        cliOptions.TraceWatch32Accesses,
+        cliOptions.TraceWatch32AccessesMaxEvents,
+        cliOptions.TraceWatch32ProgramCounterRanges,
         powerPcCore,
         cliOptions.ProgressEveryInstructions,
         () =>
@@ -581,6 +598,18 @@ try
         }
     }
 
+    if (traceRun.MemoryAccessEvents.Count > 0)
+    {
+        Console.WriteLine("MemoryAccessEvents:");
+
+        foreach (var accessEvent in traceRun.MemoryAccessEvents)
+        {
+            Console.WriteLine(
+                $"  PC=0x{accessEvent.ProgramCounter:X8} TYPE={accessEvent.AccessType} SIZE={accessEvent.SizeBytes} " +
+                $"EA=0x{accessEvent.EffectiveAddress:X8} PA=0x{accessEvent.PhysicalAddress:X8} VALUE=0x{accessEvent.Value:X8}");
+        }
+    }
+
     if (powerPcCore is not null)
     {
         Console.WriteLine(
@@ -591,6 +620,7 @@ try
             $"R31=0x{powerPcCore.Registers[31]:X8} LR=0x{powerPcCore.Registers.Lr:X8} CTR=0x{powerPcCore.Registers.Ctr:X8} " +
             $"CR=0x{powerPcCore.Registers.Cr:X8} XER=0x{powerPcCore.Registers.Xer:X8} MSR=0x{powerPcCore.MachineStateRegister:X8}");
         PrintSpecialPurposeRegisters(powerPcCore);
+        PrintPowerPcTlbEntries(powerPcCore);
     }
 
     var namedGlobals = ReadNamedGlobals(
@@ -734,6 +764,34 @@ try
     if (supervisorTracer is not null &&
         supervisorTracer.CallTrace.Count > 0)
     {
+        var supervisorCallsites = BuildSupervisorCallsiteCounts(supervisorTracer.CallTrace);
+
+        if (supervisorCallsites.Count > 0)
+        {
+            Console.WriteLine("SupervisorCallsites:");
+
+            foreach (var callsite in supervisorCallsites.Take(16))
+            {
+                Console.WriteLine(
+                    $"  Service={callsite.ServiceCode} Caller={callsite.CallerProgramCounter} Hits={callsite.Hits}");
+            }
+        }
+
+        var supervisorSignatures = BuildSupervisorSignatureCounts(supervisorTracer.CallTrace);
+
+        if (supervisorSignatures.Count > 0)
+        {
+            Console.WriteLine("SupervisorSignatures:");
+
+            foreach (var signature in supervisorSignatures.Take(20))
+            {
+                Console.WriteLine(
+                    $"  Service={signature.ServiceCode} Caller={signature.CallerProgramCounter} " +
+                    $"A0={signature.Argument0} A1={signature.Argument1} A2={signature.Argument2} A3={signature.Argument3} " +
+                    $"RET={signature.ReturnValue} Hits={signature.Hits}");
+            }
+        }
+
         Console.WriteLine("SupervisorTrace:");
 
         foreach (var entry in supervisorTracer.CallTrace.Take(40))
@@ -819,379 +877,6 @@ catch (Exception exception)
     return 3;
 }
 
-static int ParseOrDefault(string[] input, int index, int fallback)
-{
-    if (input.Length <= index)
-    {
-        return fallback;
-    }
-
-    return int.TryParse(input[index], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
-        ? parsed
-        : fallback;
-}
-
-static long ParseInstructionBudget(string[] input, int index, long fallback)
-{
-    if (input.Length <= index)
-    {
-        return fallback;
-    }
-
-    var token = input[index];
-
-    if (long.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
-    {
-        return parsed > 0
-            ? parsed
-            : fallback;
-    }
-
-    return fallback;
-}
-
-static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
-{
-    string? checkpointFilePath = null;
-    string? saveCheckpointFilePath = null;
-    string? reportJsonPath = null;
-    long? checkpointAtInstructions = null;
-    var checkpointForceRebuild = false;
-    var resumeHalted = false;
-    var chunkBudget = DefaultChunkBudget;
-    var maxHotSpots = DefaultMaxHotSpots;
-    var progressEveryInstructions = 0L;
-    var stopOnConsoleRepeatRules = new List<ConsoleRepeatStopRule>();
-    var disableNullProgramCounterRedirect = false;
-    var disable8MbHighBitAlias = false;
-    uint? stopAtProgramCounter = null;
-    uint? stopOnSupervisorService = null;
-    var stopAtProgramCounterHits = new Dictionary<uint, long>();
-    var tailLength = DefaultTailLength;
-    var supervisorReturnOverrides = new Dictionary<uint, uint>();
-    var supervisorReturnCallerOverrides = new Dictionary<SupervisorCallsiteKey, uint>();
-    var supervisorReturnCallerHitOverrides = new Dictionary<SupervisorCallsiteHitKey, uint>();
-    var memoryWriteOverrides = new Dictionary<uint, uint>();
-    var additionalInstructionWindows = new List<InstructionWindowRequest>();
-    var watchWordAddresses = new List<uint>();
-    var dynamicWatchWordRequests = new List<DynamicWatchWordRequest>();
-    var watchWordEffectiveAddresses = new List<uint>();
-    var stopOnWatchWordChangeAddresses = new HashSet<uint>();
-    var dynamicStopOnWatchWordChangeRequests = new List<DynamicWatchWordRequest>();
-    var stopOnWatchWordChangeEffectiveAddresses = new HashSet<uint>();
-    var trackedProgramCounters = new List<uint>();
-    var namedGlobalAddresses = new List<NamedAddress>();
-    var namedGlobalEffectiveAddresses = new List<NamedAddress>();
-    var profileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    var registerOverrideTokens = new List<string>();
-
-    for (var index = 0; index < tokens.Length; index++)
-    {
-        var token = tokens[index];
-
-        if (!token.StartsWith("--", StringComparison.Ordinal))
-        {
-            registerOverrideTokens.Add(token);
-            continue;
-        }
-
-        var optionName = token;
-        string? optionValue = null;
-        var separator = token.IndexOf('=');
-
-        if (separator >= 0)
-        {
-            optionName = token[..separator];
-            optionValue = token[(separator + 1)..];
-        }
-
-        switch (optionName)
-        {
-            case "--checkpoint-file":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                checkpointFilePath = Path.GetFullPath(optionValue);
-                break;
-            case "--checkpoint-at":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                checkpointAtInstructions = ParsePositiveLongOption(optionName, optionValue);
-                break;
-            case "--save-checkpoint":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                saveCheckpointFilePath = Path.GetFullPath(optionValue);
-                break;
-            case "--checkpoint-force-rebuild":
-                checkpointForceRebuild = true;
-                break;
-            case "--resume-halted":
-                resumeHalted = true;
-                break;
-            case "--chunk-budget":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                chunkBudget = ParsePositiveIntOption(optionName, optionValue);
-                break;
-            case "--max-hotspots":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                maxHotSpots = ParseNonNegativeIntOption(optionName, optionValue);
-                break;
-            case "--full-hotspots":
-                maxHotSpots = int.MaxValue;
-                break;
-            case "--progress-every":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                progressEveryInstructions = ParsePositiveLongOption(optionName, optionValue);
-                break;
-            case "--stop-on-console-repeat":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                AddDistinct(stopOnConsoleRepeatRules, ParseConsoleRepeatStopRule(optionName, optionValue));
-                break;
-            case "--report-json":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                reportJsonPath = Path.GetFullPath(optionValue);
-                break;
-            case "--profile":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                profileNames.Add(optionValue.Trim());
-                break;
-            case "--disable-null-pc-redirect":
-                disableNullProgramCounterRedirect = true;
-                break;
-            case "--disable-8mb-high-bit-alias":
-                disable8MbHighBitAlias = true;
-                break;
-            case "--svc-return":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                var supervisorOverride = ParseSupervisorReturnOverride(optionValue);
-                supervisorReturnOverrides[supervisorOverride.ServiceCode] = supervisorOverride.ReturnValue;
-                break;
-            case "--svc-return-caller":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                var supervisorCallerOverride = ParseSupervisorReturnCallerOverride(optionValue);
-                supervisorReturnCallerOverrides[supervisorCallerOverride.Callsite] = supervisorCallerOverride.ReturnValue;
-                break;
-            case "--svc-return-caller-hit":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                var supervisorCallerHitOverride = ParseSupervisorReturnCallerHitOverride(optionValue);
-                supervisorReturnCallerHitOverrides[supervisorCallerHitOverride.CallsiteHit] = supervisorCallerHitOverride.ReturnValue;
-                break;
-            case "--poke32":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                var memoryOverride = ParseSupervisorReturnOverride(optionValue);
-                memoryWriteOverrides[memoryOverride.ServiceCode] = memoryOverride.ReturnValue;
-                break;
-            case "--stop-at-pc":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                stopAtProgramCounter = ParseUInt32Flexible(optionValue);
-                break;
-            case "--stop-at-pc-hit":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                var stopAtPcHit = ParseProgramCounterHitStop(optionName, optionValue);
-                stopAtProgramCounterHits[stopAtPcHit.ProgramCounter] = stopAtPcHit.RequiredHits;
-                break;
-            case "--stop-on-svc":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                stopOnSupervisorService = ParseUInt32Flexible(optionValue);
-                break;
-            case "--tail-length":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                tailLength = ParseNonNegativeIntOption(optionName, optionValue);
-                break;
-            case "--window":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                additionalInstructionWindows.Add(ParseInstructionWindowRequest(optionValue));
-                break;
-            case "--watch32":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                watchWordAddresses.Add(ParseUInt32Flexible(optionValue));
-                break;
-            case "--watch32-reg":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                AddDistinct(dynamicWatchWordRequests, ParseDynamicWatchWordRequest(optionName, optionValue));
-                break;
-            case "--watch32-ea":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                AddDistinct(watchWordEffectiveAddresses, ParseUInt32Flexible(optionValue));
-                break;
-            case "--stop-on-watch32-change":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                stopOnWatchWordChangeAddresses.Add(ParseUInt32Flexible(optionValue));
-                break;
-            case "--stop-on-watch32-change-reg":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                AddDistinct(dynamicStopOnWatchWordChangeRequests, ParseDynamicWatchWordRequest(optionName, optionValue));
-                break;
-            case "--stop-on-watch32-change-ea":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                stopOnWatchWordChangeEffectiveAddresses.Add(ParseUInt32Flexible(optionValue));
-                break;
-            case "--global32":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                AddDistinct(namedGlobalAddresses, ParseNamedAddress(optionName, optionValue));
-                break;
-            case "--global32-ea":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                AddDistinct(namedGlobalEffectiveAddresses, ParseNamedAddress(optionName, optionValue));
-                break;
-            case "--count-pc":
-                optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
-                trackedProgramCounters.Add(ParseUInt32Flexible(optionValue));
-                break;
-            default:
-                throw new ArgumentException($"Unsupported option '{optionName}'.");
-        }
-    }
-
-    ApplyProbeProfiles(
-        profileNames,
-        additionalInstructionWindows,
-        watchWordAddresses,
-        trackedProgramCounters,
-        namedGlobalAddresses,
-        dynamicWatchWordRequests);
-
-    return new ProbeCliOptions(
-        checkpointFilePath,
-        saveCheckpointFilePath,
-        reportJsonPath,
-        checkpointAtInstructions,
-        checkpointForceRebuild,
-        resumeHalted,
-        chunkBudget,
-        maxHotSpots,
-        progressEveryInstructions,
-        stopOnConsoleRepeatRules.ToArray(),
-        stopAtProgramCounter,
-        stopAtProgramCounterHits,
-        stopOnSupervisorService,
-        tailLength,
-        supervisorReturnOverrides,
-        supervisorReturnCallerOverrides,
-        supervisorReturnCallerHitOverrides,
-        memoryWriteOverrides,
-        additionalInstructionWindows,
-        watchWordAddresses,
-        dynamicWatchWordRequests,
-        watchWordEffectiveAddresses,
-        stopOnWatchWordChangeAddresses.ToArray(),
-        dynamicStopOnWatchWordChangeRequests,
-        stopOnWatchWordChangeEffectiveAddresses.ToArray(),
-        trackedProgramCounters,
-        namedGlobalAddresses,
-        namedGlobalEffectiveAddresses,
-        profileNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray(),
-        disableNullProgramCounterRedirect,
-        disable8MbHighBitAlias,
-        registerOverrideTokens.ToArray());
-}
-
-static void ApplyProbeProfiles(
-    IReadOnlySet<string> profileNames,
-    IList<InstructionWindowRequest> additionalInstructionWindows,
-    IList<uint> watchWordAddresses,
-    IList<uint> trackedProgramCounters,
-    IList<NamedAddress> namedGlobalAddresses,
-    IList<DynamicWatchWordRequest> dynamicWatchWordRequests)
-{
-    foreach (var profileNameRaw in profileNames)
-    {
-        var profileName = profileNameRaw.Trim();
-
-        if (profileName.Equals("c2600-ram-probe", StringComparison.OrdinalIgnoreCase) ||
-            profileName.Equals("c2600-boot-probe", StringComparison.OrdinalIgnoreCase) ||
-            profileName.Equals("cisco-c2600-boot", StringComparison.OrdinalIgnoreCase))
-        {
-            const uint baseGlobal = 0x82F40774;
-
-            for (var index = 0; index <= 11; index++)
-            {
-                AddDistinct(watchWordAddresses, unchecked(baseGlobal + (uint)(index * 4)));
-            }
-
-            for (var offset = 0x774; offset <= 0x7A0; offset += 4)
-            {
-                AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(9, offset));
-            }
-
-            AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(10, 0x77C));
-            AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(10, 0x780));
-
-            var descriptorWatchAddresses = new uint[]
-            {
-                0x82F406A8,
-                0x82F406AC,
-                0x82F406B0,
-                0x82F406B4,
-                0x82F406B8,
-                0x82F406BC,
-                0x82F406C0,
-                0x82F406C4,
-                0x82F406C8,
-                0x82F406CC,
-            };
-
-            foreach (var address in descriptorWatchAddresses)
-            {
-                AddDistinct(watchWordAddresses, address);
-            }
-
-            var trackedPcs = new uint[]
-            {
-                0x816E2928,
-                0x816E292C,
-                0x816E29BC,
-                0x816E2DD4,
-                0x816E2F70,
-            };
-
-            foreach (var trackedPc in trackedPcs)
-            {
-                AddDistinct(trackedProgramCounters, trackedPc);
-            }
-
-            AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2928, 12, 12));
-            AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E29BC, 8, 8));
-            AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2DD4, 8, 8));
-
-            var c2600Globals = new NamedAddress[]
-            {
-                new("g_0x8000BCEC", 0x8000BCEC),
-                new("g_0x8000BCF0", 0x8000BCF0),
-                new("g_0x8000BCF4", 0x8000BCF4),
-                new("g_0x8000BCF8", 0x8000BCF8),
-                new("g_0x8000BCFC", 0x8000BCFC),
-                new("g_0x8000BD00", 0x8000BD00),
-                new("g_0x8000BD04", 0x8000BD04),
-                new("g_0x8000BD4C", 0x8000BD4C),
-                new("g_0x8000BD50", 0x8000BD50),
-                new("g_0x8000BD54", 0x8000BD54),
-                new("g_0x80090780", 0x80090780),
-                new("g_0x80090784", 0x80090784),
-                new("g_0x82F40774", 0x82F40774),
-                new("g_0x82F40778", 0x82F40778),
-                new("g_0x82F4077C", 0x82F4077C),
-                new("g_0x82F40780", 0x82F40780),
-                new("g_0x82F40784", 0x82F40784),
-                new("g_0x82F40788", 0x82F40788),
-                new("g_0x82F4078C", 0x82F4078C),
-                new("g_0x82F40790", 0x82F40790),
-                new("g_0x82F40794", 0x82F40794),
-                new("g_0x82F40798", 0x82F40798),
-                new("g_0x82F4079C", 0x82F4079C),
-                new("g_0x82F407A0", 0x82F407A0),
-            };
-
-            foreach (var global in c2600Globals)
-            {
-                AddDistinct(namedGlobalAddresses, global);
-            }
-            continue;
-        }
-
-        throw new ArgumentException(
-            $"Unsupported profile '{profileNameRaw}'. Supported profiles: c2600-ram-probe, c2600-boot-probe, cisco-c2600-boot.");
-    }
-
-}
-
 static void AddDistinct<T>(ICollection<T> destination, T value)
 {
     if (destination.Contains(value))
@@ -1200,281 +885,6 @@ static void AddDistinct<T>(ICollection<T> destination, T value)
     }
 
     destination.Add(value);
-}
-
-static string ReadRequiredOptionValue(string[] tokens, ref int index, string optionName)
-{
-    if (index + 1 >= tokens.Length)
-    {
-        throw new ArgumentException($"Option '{optionName}' requires a value.");
-    }
-
-    index++;
-    return tokens[index];
-}
-
-static long ParsePositiveLongOption(string optionName, string value)
-{
-    if (!long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ||
-        parsed <= 0)
-    {
-        throw new ArgumentException($"Option '{optionName}' requires a positive integer value.");
-    }
-
-    return parsed;
-}
-
-static int ParsePositiveIntOption(string optionName, string value)
-{
-    if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ||
-        parsed <= 0)
-    {
-        throw new ArgumentException($"Option '{optionName}' requires a positive integer value.");
-    }
-
-    return parsed;
-}
-
-static int ParseNonNegativeIntOption(string optionName, string value)
-{
-    if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ||
-        parsed < 0)
-    {
-        throw new ArgumentException($"Option '{optionName}' requires a non-negative integer value.");
-    }
-
-    return parsed;
-}
-
-static (uint ServiceCode, uint ReturnValue) ParseSupervisorReturnOverride(string token)
-{
-    var separator = token.IndexOf('=');
-
-    if (separator <= 0 || separator == token.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Invalid supervisor override '{token}'. Expected format '<service>=<value>'.");
-    }
-
-    var serviceCode = ParseUInt32Flexible(token[..separator]);
-    var returnValue = ParseUInt32Flexible(token[(separator + 1)..]);
-
-    return (serviceCode, returnValue);
-}
-
-static (SupervisorCallsiteKey Callsite, uint ReturnValue) ParseSupervisorReturnCallerOverride(string token)
-{
-    var equalsSeparator = token.IndexOf('=');
-
-    if (equalsSeparator <= 0 || equalsSeparator == token.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Invalid supervisor caller override '{token}'. Expected format '<service>@<caller>=<value>'.");
-    }
-
-    var callsiteToken = token[..equalsSeparator];
-    var returnValue = ParseUInt32Flexible(token[(equalsSeparator + 1)..]);
-    var atSeparator = callsiteToken.IndexOf('@');
-
-    if (atSeparator <= 0 || atSeparator == callsiteToken.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Invalid supervisor caller override '{token}'. Expected format '<service>@<caller>=<value>'.");
-    }
-
-    var serviceCode = ParseUInt32Flexible(callsiteToken[..atSeparator]);
-    var callerProgramCounter = ParseUInt32Flexible(callsiteToken[(atSeparator + 1)..]);
-    return (new SupervisorCallsiteKey(serviceCode, callerProgramCounter), returnValue);
-}
-
-static (SupervisorCallsiteHitKey CallsiteHit, uint ReturnValue) ParseSupervisorReturnCallerHitOverride(string token)
-{
-    var equalsSeparator = token.IndexOf('=');
-
-    if (equalsSeparator <= 0 || equalsSeparator == token.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Invalid supervisor caller-hit override '{token}'. Expected format '<service>@<caller>#<hit>=<value>'.");
-    }
-
-    var callsiteToken = token[..equalsSeparator];
-    var returnValue = ParseUInt32Flexible(token[(equalsSeparator + 1)..]);
-    var hashSeparator = callsiteToken.IndexOf('#');
-
-    if (hashSeparator <= 0 || hashSeparator == callsiteToken.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Invalid supervisor caller-hit override '{token}'. Expected format '<service>@<caller>#<hit>=<value>'.");
-    }
-
-    var callsitePart = callsiteToken[..hashSeparator];
-    var hitToken = callsiteToken[(hashSeparator + 1)..];
-    var callerOverride = ParseSupervisorReturnCallerOverride($"{callsitePart}=0");
-    var hit = ParsePositiveLongOption("--svc-return-caller-hit", hitToken);
-
-    if (hit > int.MaxValue)
-    {
-        throw new ArgumentException("Option '--svc-return-caller-hit' requires hit count <= 2147483647.");
-    }
-
-    var key = new SupervisorCallsiteHitKey(
-        callerOverride.Callsite.ServiceCode,
-        callerOverride.Callsite.CallerProgramCounter,
-        (int)hit);
-    return (key, returnValue);
-}
-
-static (uint ProgramCounter, long RequiredHits) ParseProgramCounterHitStop(string optionName, string token)
-{
-    var separator = token.IndexOf('=');
-
-    if (separator <= 0 || separator == token.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Invalid '{optionName}' value '{token}'. Expected format '<address>=<hit-count>'.");
-    }
-
-    var programCounter = ParseUInt32Flexible(token[..separator]);
-    var requiredHits = ParsePositiveLongOption(optionName, token[(separator + 1)..]);
-    return (programCounter, requiredHits);
-}
-
-static ConsoleRepeatStopRule ParseConsoleRepeatStopRule(string optionName, string token)
-{
-    var separator = token.LastIndexOf('=');
-
-    if (separator <= 0 || separator >= token.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Option '{optionName}' requires '<text>=<count>' format.");
-    }
-
-    var text = token[..separator];
-
-    if (!long.TryParse(
-            token[(separator + 1)..],
-            NumberStyles.Integer,
-            CultureInfo.InvariantCulture,
-            out var requiredHits) ||
-        requiredHits <= 0)
-    {
-        throw new ArgumentException(
-            $"Option '{optionName}' requires a positive hit count.");
-    }
-
-    return new ConsoleRepeatStopRule(text, requiredHits);
-}
-
-static InstructionWindowRequest ParseInstructionWindowRequest(string token)
-{
-    var parts = token.Split(':', StringSplitOptions.TrimEntries);
-
-    if (parts.Length != 3)
-    {
-        throw new ArgumentException(
-            $"Invalid window specification '{token}'. Expected '<address>:<before>:<after>'.");
-    }
-
-    var address = ParseUInt32Flexible(parts[0]);
-    var before = ParseNonNegativeIntOption("--window", parts[1]);
-    var after = ParseNonNegativeIntOption("--window", parts[2]);
-
-    return new InstructionWindowRequest(address, before, after);
-}
-
-static Dictionary<string, uint> ParseRegisterOverrides(string[] tokens)
-{
-    var overrides = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
-
-    foreach (var token in tokens)
-    {
-        var separator = token.IndexOf('=');
-
-        if (separator <= 0 || separator == token.Length - 1)
-        {
-            throw new ArgumentException(
-                $"Invalid register override '{token}'. Expected format '<register>=<value>'.");
-        }
-
-        var registerName = token[..separator].Trim();
-        var valueToken = token[(separator + 1)..].Trim();
-        var value = ParseUInt32Flexible(valueToken);
-
-        overrides[registerName] = value;
-    }
-
-    return overrides;
-}
-
-static uint ParseUInt32Flexible(string input)
-{
-    if (input.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-    {
-        return uint.Parse(input[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture);
-    }
-
-    return uint.Parse(input, NumberStyles.Integer, CultureInfo.InvariantCulture);
-}
-
-static int ParseInt32Flexible(string input)
-{
-    var token = input.Trim();
-    var negative = token.Length > 0 && token[0] == '-';
-    var numericPart = negative ? token[1..] : token;
-
-    if (numericPart.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-    {
-        var parsed = int.Parse(numericPart[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture);
-        return negative ? -parsed : parsed;
-    }
-
-    return int.Parse(token, NumberStyles.Integer, CultureInfo.InvariantCulture);
-}
-
-static NamedAddress ParseNamedAddress(string optionName, string token)
-{
-    var separator = token.IndexOf('=');
-
-    if (separator <= 0 || separator == token.Length - 1)
-    {
-        throw new ArgumentException(
-            $"Invalid '{optionName}' value '{token}'. Expected format '<name>=<address>'.");
-    }
-
-    var name = token[..separator].Trim();
-
-    if (string.IsNullOrEmpty(name))
-    {
-        throw new ArgumentException($"Invalid '{optionName}' value '{token}'. Global name cannot be empty.");
-    }
-
-    var address = ParseUInt32Flexible(token[(separator + 1)..].Trim());
-    return new NamedAddress(name, address);
-}
-
-static DynamicWatchWordRequest ParseDynamicWatchWordRequest(string optionName, string token)
-{
-    var parts = token.Split(':', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-
-    if (parts.Length != 2)
-    {
-        throw new ArgumentException(
-            $"Invalid '{optionName}' value '{token}'. Expected format '<register>:<offset>'.");
-    }
-
-    var registerToken = parts[0];
-
-    if (registerToken.Length < 2 ||
-        (registerToken[0] != 'r' && registerToken[0] != 'R') ||
-        !int.TryParse(registerToken[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var registerIndex) ||
-        registerIndex is < 0 or > 31)
-    {
-        throw new ArgumentException(
-            $"Invalid register '{registerToken}' in '{optionName}'. Expected r0..r31.");
-    }
-
-    var offset = ParseInt32Flexible(parts[1]);
-    return new DynamicWatchWordRequest(registerIndex, offset);
 }
 
 static string FormatDynamicWatchWordRequest(DynamicWatchWordRequest request)
@@ -1611,6 +1021,28 @@ static void ApplyMemoryOverrides(
     }
 }
 
+static bool EnsureCiscoPowerPcLowVectorEntryStub(
+    RuntimeSessionState state,
+    ImageInspectionResult inspection)
+{
+    if (state.CpuCore is not PowerPc32CpuCore powerPcCore)
+    {
+        return false;
+    }
+
+    var installed = CiscoPowerPcLowVectorBootstrap.TryInstallEntryStub(
+        state.Machine.MemoryBus,
+        inspection,
+        state.BootstrapReport.EntryPoint);
+
+    if (installed)
+    {
+        powerPcCore.NullProgramCounterRedirectEnabled = false;
+    }
+
+    return installed;
+}
+
 static long RunBudgetWithoutTrace(
     EmulationMachine machine,
     long budget,
@@ -1662,6 +1094,76 @@ static long CountSubstringOccurrences(string source, string needle)
     return hits;
 }
 
+static bool IsProgramCounterInRanges(uint programCounter, IReadOnlyList<AddressRange> ranges)
+{
+    if (ranges.Count == 0)
+    {
+        return true;
+    }
+
+    foreach (var range in ranges)
+    {
+        if (programCounter >= range.Start &&
+            programCounter <= range.End)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static IReadOnlyList<AddressRange> BuildWordWatchRanges(IReadOnlyList<uint> addresses)
+{
+    if (addresses.Count == 0)
+    {
+        return Array.Empty<AddressRange>();
+    }
+
+    var ranges = new AddressRange[addresses.Count];
+
+    for (var index = 0; index < addresses.Count; index++)
+    {
+        var start = addresses[index];
+        var end = unchecked(start + 3u);
+        ranges[index] = new AddressRange(start, end);
+    }
+
+    return ranges;
+}
+
+static bool IsMemoryAccessWithinRanges(
+    uint address,
+    int sizeBytes,
+    IReadOnlyList<AddressRange> ranges)
+{
+    if (ranges.Count == 0)
+    {
+        return false;
+    }
+
+    if (sizeBytes <= 0)
+    {
+        return false;
+    }
+
+    var accessStart = address;
+    var accessEnd = unchecked(address + (uint)(sizeBytes - 1));
+
+    foreach (var range in ranges)
+    {
+        if (accessEnd < range.Start ||
+            accessStart > range.End)
+        {
+            continue;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
 static TracedRunResult RunBudgetWithTrace(
     EmulationMachine machine,
     long budget,
@@ -1678,6 +1180,9 @@ static TracedRunResult RunBudgetWithTrace(
     IReadOnlyList<uint> stopOnWatchWordChangeAddresses,
     IReadOnlyList<DynamicWatchWordRequest> dynamicStopOnWatchWordChangeRequests,
     IReadOnlyList<uint> stopOnWatchWordChangeEffectiveAddresses,
+    bool traceWatchWordAccesses,
+    int traceWatchWordAccessesMaxEvents,
+    IReadOnlyList<AddressRange> traceWatchWordProgramCounterRanges,
     PowerPc32CpuCore? powerPcCore,
     long progressEveryInstructions,
     Func<ExecutionStopReason?>? stopEvaluator,
@@ -1696,6 +1201,11 @@ static TracedRunResult RunBudgetWithTrace(
                             dynamicStopOnWatchWordChangeRequests.Count > 0 ||
                             stopOnWatchWordChangeEffectiveAddresses.Count > 0
         ? new List<MemoryWatchTraceEntry>()
+        : null;
+    var memoryAccessEvents = traceWatchWordAccesses &&
+                             traceWatchWordAccessesMaxEvents > 0 &&
+                             powerPcCore is not null
+        ? new List<PowerPcMemoryAccessTraceEntry>()
         : null;
     HashSet<uint>? trackedProgramCounterSet = null;
     var runStopwatch = Stopwatch.StartNew();
@@ -1729,6 +1239,43 @@ static TracedRunResult RunBudgetWithTrace(
         var stopOnWatchWordChangeSet = currentStopOnWatchWordChangeAddresses.Count > 0
             ? currentStopOnWatchWordChangeAddresses.ToHashSet()
             : null;
+        IReadOnlyList<AddressRange>? traceWatchAddressRanges = null;
+        Action<PowerPcMemoryAccessTraceEntry>? priorMemoryTraceSink = null;
+        var canTraceMemoryAccesses = powerPcCore is not null &&
+                                     memoryAccessEvents is not null &&
+                                     memoryAccessEvents.Count < traceWatchWordAccessesMaxEvents &&
+                                     currentTraceWatchWordAddresses.Length > 0;
+
+        if (canTraceMemoryAccesses)
+        {
+            traceWatchAddressRanges = BuildWordWatchRanges(currentTraceWatchWordAddresses);
+            priorMemoryTraceSink = powerPcCore!.MemoryAccessTraceSink;
+            powerPcCore.MemoryAccessTraceSink = accessEntry =>
+            {
+                if (memoryAccessEvents!.Count >= traceWatchWordAccessesMaxEvents)
+                {
+                    return;
+                }
+
+                if (!IsMemoryAccessWithinRanges(
+                        accessEntry.PhysicalAddress,
+                        accessEntry.SizeBytes,
+                        traceWatchAddressRanges))
+                {
+                    return;
+                }
+
+                if (!IsProgramCounterInRanges(
+                        accessEntry.ProgramCounter,
+                        traceWatchWordProgramCounterRanges))
+                {
+                    return;
+                }
+
+                memoryAccessEvents.Add(accessEntry);
+            };
+        }
+
         ExecutionTraceSummary traceSummary;
 
         try
@@ -1818,6 +1365,27 @@ static TracedRunResult RunBudgetWithTrace(
                             watchEvent.Address,
                             watchEvent.PreviousValue,
                             watchEvent.CurrentValue));
+                }
+            }
+
+            if (memoryAccessEvents is { Count: > 0 })
+            {
+                errorDetails.AppendLine("MemoryAccessWatchBeforeFailure:");
+                var start = Math.Max(0, memoryAccessEvents.Count - Math.Min(memoryAccessEvents.Count, 32));
+
+                for (var index = start; index < memoryAccessEvents.Count; index++)
+                {
+                    var accessEvent = memoryAccessEvents[index];
+                    errorDetails.AppendLine(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "  PC=0x{0:X8} TYPE={1} SIZE={2} EA=0x{3:X8} PA=0x{4:X8} VALUE=0x{5:X8}",
+                            accessEvent.ProgramCounter,
+                            accessEvent.AccessType,
+                            accessEvent.SizeBytes,
+                            accessEvent.EffectiveAddress,
+                            accessEvent.PhysicalAddress,
+                            accessEvent.Value));
                 }
             }
 
@@ -1980,6 +1548,13 @@ static TracedRunResult RunBudgetWithTrace(
 
             throw new InvalidOperationException(errorDetails.ToString(), exception);
         }
+        finally
+        {
+            if (canTraceMemoryAccesses)
+            {
+                powerPcCore!.MemoryAccessTraceSink = priorMemoryTraceSink;
+            }
+        }
 
         var chunkExecuted = traceSummary.Summary.ExecutedInstructions;
 
@@ -2053,7 +1628,8 @@ static TracedRunResult RunBudgetWithTrace(
         executed,
         tail?.ToArray() ?? Array.Empty<uint>(),
         stopReason,
-        memoryWatchEvents?.ToArray() ?? Array.Empty<MemoryWatchTraceEntry>());
+        memoryWatchEvents?.ToArray() ?? Array.Empty<MemoryWatchTraceEntry>(),
+        memoryAccessEvents?.ToArray() ?? Array.Empty<PowerPcMemoryAccessTraceEntry>());
 }
 
 static ProbeCheckpoint CreateCheckpoint(
@@ -2977,6 +2553,46 @@ static void PrintSpecialPurposeRegisters(PowerPc32CpuCore powerPcCore)
     }
 }
 
+static void PrintPowerPcTlbEntries(PowerPc32CpuCore powerPcCore)
+{
+    var instructionTlb = powerPcCore.GetInstructionTlbEntries();
+    var dataTlb = powerPcCore.GetDataTlbEntries();
+
+    if (instructionTlb.Count == 0 &&
+        dataTlb.Count == 0)
+    {
+        return;
+    }
+
+    Console.WriteLine("InstructionTlb:");
+    PrintPowerPcTlbEntrySet(instructionTlb);
+
+    Console.WriteLine("DataTlb:");
+    PrintPowerPcTlbEntrySet(dataTlb);
+}
+
+static void PrintPowerPcTlbEntrySet(IReadOnlyList<PowerPc32TlbEntryState> entries)
+{
+    if (entries.Count == 0)
+    {
+        Console.WriteLine("  <empty>");
+        return;
+    }
+
+    foreach (var entry in entries.OrderBy(entry => entry.Index).Take(24))
+    {
+        var pageSizeBytes = DecodeMpc8xxPageSizeForDebug(entry.TableWalkControl, entry.RealPageNumber);
+        Console.WriteLine(
+            $"  IDX={entry.Index} EPN=0x{entry.EffectivePageNumber:X8} RPN=0x{entry.RealPageNumber:X8} " +
+            $"TWC=0x{entry.TableWalkControl:X8} SIZE={pageSizeBytes}");
+    }
+
+    if (entries.Count > 24)
+    {
+        Console.WriteLine($"  ... {entries.Count - 24} more entries");
+    }
+}
+
 static IReadOnlyDictionary<string, uint> ReadNamedGlobals(
     EmulationMachine machine,
     IReadOnlyList<NamedAddress> namedAddresses,
@@ -3277,6 +2893,111 @@ static void PrintSupervisorCallCounters(
     }
 }
 
+static IReadOnlyList<ProbeSupervisorCallsiteReport> BuildSupervisorCallsiteCounts(
+    IReadOnlyList<PowerPcSupervisorCallTraceEntry> supervisorCallTrace)
+{
+    if (supervisorCallTrace.Count == 0)
+    {
+        return Array.Empty<ProbeSupervisorCallsiteReport>();
+    }
+
+    return supervisorCallTrace
+        .GroupBy(entry => (entry.ServiceCode, entry.CallerProgramCounter))
+        .OrderByDescending(group => group.LongCount())
+        .ThenBy(group => group.Key.ServiceCode)
+        .ThenBy(group => group.Key.CallerProgramCounter)
+        .Select(group => new ProbeSupervisorCallsiteReport(
+            ServiceCode: $"0x{group.Key.ServiceCode:X8}",
+            CallerProgramCounter: $"0x{group.Key.CallerProgramCounter:X8}",
+            Hits: group.LongCount()))
+        .ToArray();
+}
+
+static IReadOnlyList<ProbeSupervisorSignatureReport> BuildSupervisorSignatureCounts(
+    IReadOnlyList<PowerPcSupervisorCallTraceEntry> supervisorCallTrace)
+{
+    if (supervisorCallTrace.Count == 0)
+    {
+        return Array.Empty<ProbeSupervisorSignatureReport>();
+    }
+
+    return supervisorCallTrace
+        .GroupBy(entry => new
+        {
+            entry.ServiceCode,
+            entry.CallerProgramCounter,
+            entry.Argument0,
+            entry.Argument1,
+            entry.Argument2,
+            entry.Argument3,
+            entry.ReturnValue,
+        })
+        .OrderByDescending(group => group.LongCount())
+        .ThenBy(group => group.Key.ServiceCode)
+        .ThenBy(group => group.Key.CallerProgramCounter)
+        .ThenBy(group => group.Key.Argument0)
+        .ThenBy(group => group.Key.Argument1)
+        .ThenBy(group => group.Key.Argument2)
+        .ThenBy(group => group.Key.Argument3)
+        .ThenBy(group => group.Key.ReturnValue)
+        .Select(group => new ProbeSupervisorSignatureReport(
+            ServiceCode: $"0x{group.Key.ServiceCode:X8}",
+            CallerProgramCounter: $"0x{group.Key.CallerProgramCounter:X8}",
+            Argument0: $"0x{group.Key.Argument0:X8}",
+            Argument1: $"0x{group.Key.Argument1:X8}",
+            Argument2: $"0x{group.Key.Argument2:X8}",
+            Argument3: $"0x{group.Key.Argument3:X8}",
+            ReturnValue: $"0x{group.Key.ReturnValue:X8}",
+            Hits: group.LongCount()))
+        .ToArray();
+}
+
+static ProbePowerPcCpuStateReport CreatePowerPcCpuStateReport(PowerPc32CpuCore powerPcCore)
+{
+    var gpr = new Dictionary<string, string>(32, StringComparer.Ordinal);
+
+    for (var index = 0; index < 32; index++)
+    {
+        gpr[$"r{index}"] = $"0x{powerPcCore.Registers[index]:X8}";
+    }
+
+    var specialPurposeRegisters = powerPcCore.ExtendedSpecialPurposeRegisters
+        .OrderBy(entry => entry.Key)
+        .ToDictionary(
+            entry => $"SPR[{entry.Key}]",
+            entry => $"0x{entry.Value:X8}",
+            StringComparer.Ordinal);
+
+    return new ProbePowerPcCpuStateReport(
+        ProgramCounter: $"0x{powerPcCore.ProgramCounter:X8}",
+        LinkRegister: $"0x{powerPcCore.Registers.Lr:X8}",
+        CounterRegister: $"0x{powerPcCore.Registers.Ctr:X8}",
+        ConditionRegister: $"0x{powerPcCore.Registers.Cr:X8}",
+        FixedPointExceptionRegister: $"0x{powerPcCore.Registers.Xer:X8}",
+        MachineStateRegister: $"0x{powerPcCore.MachineStateRegister:X8}",
+        GeneralPurposeRegisters: gpr,
+        SpecialPurposeRegisters: specialPurposeRegisters);
+}
+
+static IReadOnlyList<ProbeTlbEntryReport> CreateTlbEntryReports(
+    IReadOnlyList<PowerPc32TlbEntryState> entries)
+{
+    if (entries.Count == 0)
+    {
+        return Array.Empty<ProbeTlbEntryReport>();
+    }
+
+    return entries
+        .OrderBy(entry => entry.Index)
+        .Select(entry => new ProbeTlbEntryReport(
+            Index: entry.Index,
+            EffectivePageNumber: $"0x{entry.EffectivePageNumber:X8}",
+            RealPageNumber: $"0x{entry.RealPageNumber:X8}",
+            TableWalkControl: $"0x{entry.TableWalkControl:X8}",
+            PageSizeBytes: DecodeMpc8xxPageSizeForDebug(entry.TableWalkControl, entry.RealPageNumber)))
+        .ToArray();
+}
+
 static ProbeRunReport CreateProbeReport(
     string imagePath,
     int imageSizeBytes,
@@ -3327,6 +3048,15 @@ static ProbeRunReport CreateProbeReport(
             $"0x{entry.Address:X8}",
             $"0x{entry.PreviousValue:X8}",
             $"0x{entry.CurrentValue:X8}"))
+        .ToArray();
+    var memoryAccessEvents = traceRun.MemoryAccessEvents
+        .Select(entry => new ProbeMemoryAccessEventReport(
+            $"0x{entry.ProgramCounter:X8}",
+            entry.AccessType.ToString(),
+            entry.SizeBytes,
+            $"0x{entry.EffectiveAddress:X8}",
+            $"0x{entry.PhysicalAddress:X8}",
+            $"0x{entry.Value:X8}"))
         .ToArray();
     var nullProgramCounterRedirectTrace = nullProgramCounterRedirectEvents
         .TakeLast(64)
@@ -3380,6 +3110,28 @@ static ProbeRunReport CreateProbeReport(
             entry => $"0x{entry.Key:X8}",
             entry => entry.Value,
             StringComparer.Ordinal);
+    var supervisorCallsites = BuildSupervisorCallsiteCounts(supervisorCallTrace)
+        .ToDictionary(
+            entry => $"{entry.ServiceCode}@{entry.CallerProgramCounter}",
+            entry => entry.Hits,
+            StringComparer.Ordinal);
+    var supervisorSignatures = BuildSupervisorSignatureCounts(supervisorCallTrace)
+        .ToDictionary(
+            entry => $"{entry.ServiceCode}@{entry.CallerProgramCounter} " +
+                     $"a0={entry.Argument0} a1={entry.Argument1} a2={entry.Argument2} a3={entry.Argument3} " +
+                     $"ret={entry.ReturnValue}",
+            entry => entry.Hits,
+            StringComparer.Ordinal);
+    var powerPcCore = state.CpuCore as PowerPc32CpuCore;
+    var powerPcCpuState = powerPcCore is null
+        ? null
+        : CreatePowerPcCpuStateReport(powerPcCore);
+    var instructionTlb = powerPcCore is null
+        ? Array.Empty<ProbeTlbEntryReport>()
+        : CreateTlbEntryReports(powerPcCore.GetInstructionTlbEntries());
+    var dataTlb = powerPcCore is null
+        ? Array.Empty<ProbeTlbEntryReport>()
+        : CreateTlbEntryReports(powerPcCore.GetDataTlbEntries());
 
     return new ProbeRunReport(
         DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
@@ -3417,9 +3169,15 @@ static ProbeRunReport CreateProbeReport(
         hotSpots,
         tail,
         watchEvents,
+        memoryAccessEvents,
         supervisorCallsTotal,
         supervisorCallsDelta,
+        supervisorCallsites,
+        supervisorSignatures,
         supervisorTrace,
+        powerPcCpuState,
+        instructionTlb,
+        dataTlb,
         consoleOutput);
 }
 
@@ -3436,11 +3194,11 @@ static void SaveProbeReport(string reportJsonPath, ProbeRunReport report)
     File.WriteAllText(reportJsonPath, json);
 }
 
-file sealed record ConsoleRepeatStopRule(
+sealed record ConsoleRepeatStopRule(
     string Text,
     long RequiredHits);
 
-file sealed record ProbeCliOptions(
+sealed record ProbeCliOptions(
     string? CheckpointFilePath,
     string? SaveCheckpointFilePath,
     string? ReportJsonPath,
@@ -3457,6 +3215,7 @@ file sealed record ProbeCliOptions(
     int TailLength,
     IReadOnlyDictionary<uint, uint> SupervisorReturnOverrides,
     IReadOnlyDictionary<SupervisorCallsiteKey, uint> SupervisorReturnCallerOverrides,
+    IReadOnlyDictionary<SupervisorCallSignatureKey, uint> SupervisorReturnSignatureOverrides,
     IReadOnlyDictionary<SupervisorCallsiteHitKey, uint> SupervisorReturnCallerHitOverrides,
     IReadOnlyDictionary<uint, uint> MemoryWriteOverrides,
     IReadOnlyList<InstructionWindowRequest> AdditionalInstructionWindows,
@@ -3466,6 +3225,9 @@ file sealed record ProbeCliOptions(
     IReadOnlyList<uint> StopOnWatchWordChangeAddresses,
     IReadOnlyList<DynamicWatchWordRequest> DynamicStopOnWatchWordChangeRequests,
     IReadOnlyList<uint> StopOnWatchWordChangeEffectiveAddresses,
+    bool TraceWatch32Accesses,
+    int TraceWatch32AccessesMaxEvents,
+    IReadOnlyList<AddressRange> TraceWatch32ProgramCounterRanges,
     IReadOnlyList<uint> TrackedProgramCounters,
     IReadOnlyList<NamedAddress> NamedGlobalAddresses,
     IReadOnlyList<NamedAddress> NamedGlobalEffectiveAddresses,
@@ -3474,20 +3236,21 @@ file sealed record ProbeCliOptions(
     bool Disable8MbHighBitAlias,
     string[] RegisterOverrideTokens);
 
-file sealed record TracedRunResult(
+sealed record TracedRunResult(
     long ExecutedInstructions,
     IReadOnlyList<uint> ProgramCounterTail,
     ExecutionStopReason StopReason,
-    IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents);
+    IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents,
+    IReadOnlyList<PowerPcMemoryAccessTraceEntry> MemoryAccessEvents);
 
-file sealed record TraceProgress(
+sealed record TraceProgress(
     long ExecutedInstructions,
     long RemainingInstructions,
     uint ProgramCounter,
     double InstructionsPerSecond,
     ExecutionStopReason LastChunkStopReason);
 
-file sealed record ProbeRunReport(
+sealed record ProbeRunReport(
     string GeneratedAtUtc,
     string ImagePath,
     int ImageSizeBytes,
@@ -3523,22 +3286,36 @@ file sealed record ProbeRunReport(
     IReadOnlyList<ProbeHotSpotReport> HotSpots,
     IReadOnlyList<string> ProgramCounterTail,
     IReadOnlyList<ProbeMemoryWatchEventReport> MemoryWatchEvents,
+    IReadOnlyList<ProbeMemoryAccessEventReport> MemoryAccessEvents,
     IReadOnlyDictionary<string, long> SupervisorCallsTotal,
     IReadOnlyDictionary<string, long> SupervisorCallsDelta,
+    IReadOnlyDictionary<string, long> SupervisorCallsites,
+    IReadOnlyDictionary<string, long> SupervisorSignatures,
     IReadOnlyList<ProbeSupervisorCallTraceReport> SupervisorTrace,
+    ProbePowerPcCpuStateReport? PowerPcCpuState,
+    IReadOnlyList<ProbeTlbEntryReport> InstructionTlb,
+    IReadOnlyList<ProbeTlbEntryReport> DataTlb,
     string ConsoleOutput);
 
-file sealed record ProbeHotSpotReport(
+sealed record ProbeHotSpotReport(
     string ProgramCounter,
     long Hits);
 
-file sealed record ProbeMemoryWatchEventReport(
+sealed record ProbeMemoryWatchEventReport(
     string ProgramCounter,
     string Address,
     string PreviousValue,
     string CurrentValue);
 
-file sealed record ProbeNullProgramCounterRedirectReport(
+sealed record ProbeMemoryAccessEventReport(
+    string ProgramCounter,
+    string AccessType,
+    int SizeBytes,
+    string EffectiveAddress,
+    string PhysicalAddress,
+    string Value);
+
+sealed record ProbeNullProgramCounterRedirectReport(
     string Source,
     string RedirectTarget,
     string CandidateValue,
@@ -3554,7 +3331,7 @@ file sealed record ProbeNullProgramCounterRedirectReport(
     string StackWordPlus4,
     string StackWordPlus8);
 
-file sealed record ProbeSupervisorCallTraceReport(
+sealed record ProbeSupervisorCallTraceReport(
     string ProgramCounter,
     string ServiceCode,
     string LinkRegister,
@@ -3567,7 +3344,39 @@ file sealed record ProbeSupervisorCallTraceReport(
     bool Halt,
     string? NextProgramCounter);
 
-file static class ProbeReportJson
+sealed record ProbeSupervisorCallsiteReport(
+    string ServiceCode,
+    string CallerProgramCounter,
+    long Hits);
+
+sealed record ProbeSupervisorSignatureReport(
+    string ServiceCode,
+    string CallerProgramCounter,
+    string Argument0,
+    string Argument1,
+    string Argument2,
+    string Argument3,
+    string ReturnValue,
+    long Hits);
+
+sealed record ProbePowerPcCpuStateReport(
+    string ProgramCounter,
+    string LinkRegister,
+    string CounterRegister,
+    string ConditionRegister,
+    string FixedPointExceptionRegister,
+    string MachineStateRegister,
+    IReadOnlyDictionary<string, string> GeneralPurposeRegisters,
+    IReadOnlyDictionary<string, string> SpecialPurposeRegisters);
+
+sealed record ProbeTlbEntryReport(
+    int Index,
+    string EffectivePageNumber,
+    string RealPageNumber,
+    string TableWalkControl,
+    uint PageSizeBytes);
+
+static class ProbeReportJson
 {
     internal static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -3575,24 +3384,36 @@ file static class ProbeReportJson
     };
 }
 
-file sealed record InstructionWindowRequest(
+sealed record InstructionWindowRequest(
     uint Address,
     int Before,
     int After);
 
-file sealed record NamedAddress(
+sealed record NamedAddress(
     string Name,
     uint Address);
 
-file sealed record DynamicWatchWordRequest(
+sealed record DynamicWatchWordRequest(
     int RegisterIndex,
     int Offset);
 
-file readonly record struct SupervisorCallsiteKey(
+readonly record struct AddressRange(
+    uint Start,
+    uint End);
+
+readonly record struct SupervisorCallsiteKey(
     uint ServiceCode,
     uint CallerProgramCounter);
 
-file readonly record struct SupervisorCallsiteHitKey(
+readonly record struct SupervisorCallSignatureKey(
+    uint ServiceCode,
+    uint CallerProgramCounter,
+    uint Argument0,
+    uint Argument1,
+    uint Argument2,
+    uint Argument3);
+
+readonly record struct SupervisorCallsiteHitKey(
     uint ServiceCode,
     uint CallerProgramCounter,
     int Hit);
@@ -3631,6 +3452,7 @@ file sealed class OverrideReturnPowerPcSupervisorCallHandler : IPowerPcSuperviso
     private readonly IPowerPcSupervisorCallHandler _inner;
     private readonly IReadOnlyDictionary<uint, uint> _overrides;
     private readonly IReadOnlyDictionary<SupervisorCallsiteKey, uint> _callsiteOverrides;
+    private readonly IReadOnlyDictionary<SupervisorCallSignatureKey, uint> _signatureOverrides;
     private readonly IReadOnlyDictionary<SupervisorCallsiteHitKey, uint> _callsiteHitOverrides;
     private readonly Dictionary<SupervisorCallsiteKey, int> _callsiteHitCounters = new();
 
@@ -3638,16 +3460,19 @@ file sealed class OverrideReturnPowerPcSupervisorCallHandler : IPowerPcSuperviso
         IPowerPcSupervisorCallHandler inner,
         IReadOnlyDictionary<uint, uint> overrides,
         IReadOnlyDictionary<SupervisorCallsiteKey, uint> callsiteOverrides,
+        IReadOnlyDictionary<SupervisorCallSignatureKey, uint> signatureOverrides,
         IReadOnlyDictionary<SupervisorCallsiteHitKey, uint> callsiteHitOverrides)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _overrides = overrides ?? throw new ArgumentNullException(nameof(overrides));
         _callsiteOverrides = callsiteOverrides ?? throw new ArgumentNullException(nameof(callsiteOverrides));
+        _signatureOverrides = signatureOverrides ?? throw new ArgumentNullException(nameof(signatureOverrides));
         _callsiteHitOverrides = callsiteHitOverrides ?? throw new ArgumentNullException(nameof(callsiteHitOverrides));
     }
 
     public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
     {
+        var innerResult = _inner.Handle(context);
         var callsiteKey = new SupervisorCallsiteKey(context.ServiceCode, context.CallerProgramCounter);
         _callsiteHitCounters.TryGetValue(callsiteKey, out var currentCallsiteHits);
         var nextHit = currentCallsiteHits + 1;
@@ -3656,20 +3481,33 @@ file sealed class OverrideReturnPowerPcSupervisorCallHandler : IPowerPcSuperviso
 
         if (_callsiteHitOverrides.TryGetValue(callsiteHitKey, out var callsiteHitReturnValue))
         {
-            return new PowerPcSupervisorCallResult(callsiteHitReturnValue);
+            return innerResult with { ReturnValue = callsiteHitReturnValue };
+        }
+
+        var signatureKey = new SupervisorCallSignatureKey(
+            context.ServiceCode,
+            context.CallerProgramCounter,
+            context.Argument0,
+            context.Argument1,
+            context.Argument2,
+            context.Argument3);
+
+        if (_signatureOverrides.TryGetValue(signatureKey, out var signatureReturnValue))
+        {
+            return innerResult with { ReturnValue = signatureReturnValue };
         }
 
         if (_callsiteOverrides.TryGetValue(callsiteKey, out var callsiteReturnValue))
         {
-            return new PowerPcSupervisorCallResult(callsiteReturnValue);
+            return innerResult with { ReturnValue = callsiteReturnValue };
         }
 
         if (_overrides.TryGetValue(context.ServiceCode, out var returnValue))
         {
-            return new PowerPcSupervisorCallResult(returnValue);
+            return innerResult with { ReturnValue = returnValue };
         }
 
-        return _inner.Handle(context);
+        return innerResult;
     }
 }
 

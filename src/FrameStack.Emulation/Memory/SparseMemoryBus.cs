@@ -2,7 +2,7 @@ using FrameStack.Emulation.Abstractions;
 
 namespace FrameStack.Emulation.Memory;
 
-public sealed class SparseMemoryBus : IMemoryBus
+public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
 {
     private const int PageSize = 4096;
     private const int PageShift = 12;
@@ -10,6 +10,8 @@ public sealed class SparseMemoryBus : IMemoryBus
 
     private readonly ulong _maxMappedBytes;
     private readonly Dictionary<uint, byte[]> _pages = new();
+    private readonly List<WriteProtectedRange> _writeProtectedRanges = [];
+    private int _privilegedWriteScopeDepth;
 
     public ulong MaxMappedBytes => _maxMappedBytes;
 
@@ -21,6 +23,27 @@ public sealed class SparseMemoryBus : IMemoryBus
         }
 
         _maxMappedBytes = maxMappedBytes;
+    }
+
+    public void ProtectWriteRange(uint baseAddress, uint sizeBytes)
+    {
+        if (sizeBytes == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sizeBytes), "Protected range size must be greater than zero.");
+        }
+
+        var start = baseAddress;
+        var end = checked(baseAddress + sizeBytes - 1);
+
+        _writeProtectedRanges.Add(new WriteProtectedRange(start, end));
+        _writeProtectedRanges.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+        MergeWriteProtectedRanges();
+    }
+
+    public IDisposable BeginPrivilegedWriteScope()
+    {
+        _privilegedWriteScopeDepth++;
+        return new PrivilegedWriteScope(this);
     }
 
     public byte ReadByte(uint address)
@@ -38,6 +61,11 @@ public sealed class SparseMemoryBus : IMemoryBus
 
     public void WriteByte(uint address, byte value)
     {
+        if (IsWriteProtected(address, sizeof(byte)))
+        {
+            return;
+        }
+
         var pageIndex = address >> PageShift;
         var pageOffset = (int)(address & PageMask);
         var page = GetOrCreatePage(pageIndex);
@@ -76,6 +104,11 @@ public sealed class SparseMemoryBus : IMemoryBus
 
     public void WriteUInt32(uint address, uint value)
     {
+        if (IsWriteProtected(address, sizeof(uint)))
+        {
+            return;
+        }
+
         var pageIndex = address >> PageShift;
         var pageOffset = (int)(address & PageMask);
 
@@ -97,6 +130,17 @@ public sealed class SparseMemoryBus : IMemoryBus
 
     public void LoadBytes(uint baseAddress, byte[] bytes)
     {
+        if (_writeProtectedRanges.Count > 0 &&
+            _privilegedWriteScopeDepth == 0)
+        {
+            for (var index = 0; index < bytes.Length; index++)
+            {
+                WriteByte(baseAddress + (uint)index, bytes[index]);
+            }
+
+            return;
+        }
+
         var sourceOffset = 0;
 
         while (sourceOffset < bytes.Length)
@@ -170,5 +214,84 @@ public sealed class SparseMemoryBus : IMemoryBus
         var page = new byte[PageSize];
         _pages[pageIndex] = page;
         return page;
+    }
+
+    private bool IsWriteProtected(uint address, int sizeBytes)
+    {
+        if (_privilegedWriteScopeDepth > 0 ||
+            _writeProtectedRanges.Count == 0)
+        {
+            return false;
+        }
+
+        var start = (ulong)address;
+        var end = start + (ulong)sizeBytes - 1;
+
+        foreach (var range in _writeProtectedRanges)
+        {
+            if (end < range.Start ||
+                start > range.End)
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private void MergeWriteProtectedRanges()
+    {
+        if (_writeProtectedRanges.Count <= 1)
+        {
+            return;
+        }
+
+        var targetIndex = 0;
+
+        for (var sourceIndex = 1; sourceIndex < _writeProtectedRanges.Count; sourceIndex++)
+        {
+            var previous = _writeProtectedRanges[targetIndex];
+            var current = _writeProtectedRanges[sourceIndex];
+            var previousEndPlusOne = previous.End == uint.MaxValue
+                ? (ulong)uint.MaxValue
+                : (ulong)previous.End + 1UL;
+
+            if ((ulong)current.Start <= previousEndPlusOne)
+            {
+                var mergedEnd = Math.Max(previous.End, current.End);
+                _writeProtectedRanges[targetIndex] = new WriteProtectedRange(previous.Start, mergedEnd);
+                continue;
+            }
+
+            targetIndex++;
+            _writeProtectedRanges[targetIndex] = current;
+        }
+
+        _writeProtectedRanges.RemoveRange(targetIndex + 1, _writeProtectedRanges.Count - targetIndex - 1);
+    }
+
+    private void EndPrivilegedWriteScope()
+    {
+        if (_privilegedWriteScopeDepth == 0)
+        {
+            return;
+        }
+
+        _privilegedWriteScopeDepth--;
+    }
+
+    private readonly record struct WriteProtectedRange(uint Start, uint End);
+
+    private sealed class PrivilegedWriteScope(SparseMemoryBus owner) : IDisposable
+    {
+        private SparseMemoryBus? _owner = owner;
+
+        public void Dispose()
+        {
+            _owner?.EndPrivilegedWriteScope();
+            _owner = null;
+        }
     }
 }

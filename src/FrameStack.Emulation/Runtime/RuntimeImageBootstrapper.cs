@@ -9,10 +9,13 @@ namespace FrameStack.Emulation.Runtime;
 public sealed class RuntimeImageBootstrapper
 {
     private const uint OneMbInBytes = 1024u * 1024u;
-    private const int CiscoC2600ReportedMemoryMaxMb = 128;
+    // C2600 boot firmware expects classic 64MB ceiling for stable IOMEM negotiation.
+    private const int CiscoC2600ReportedMemoryMaxMb = 64;
     private const uint CiscoC2600BootMode = 1;
     private const uint CiscoC2600BootInfoPointer = 0x8000_BD00;
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
+    private const uint CiscoC2600IoMemoryDescriptorAddress = 0x8336_67E0;
+    private const uint CiscoC2600IoMemoryDescriptorSizeBytes = 0x10;
 
     private readonly IImageAnalyzer _imageAnalyzer;
     private readonly IReadOnlyList<IImageLoader> _imageLoaders;
@@ -47,10 +50,19 @@ public sealed class RuntimeImageBootstrapper
             memoryBus.LoadBytes(segment.VirtualAddress, segment.Data);
         }
 
+        ApplyCiscoMemoryWriteProtection(memoryBus, inspection);
+
+        var lowVectorEntryStubInstalled =
+            CiscoPowerPcLowVectorBootstrap.TryInstallEntryStub(memoryBus, inspection, loadedImage.EntryPoint);
         var cpuCore = CreateCpuCore(loadedImage, inspection, memoryMb);
         var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
 
-        ApplyDefaultCpuInitialization(cpuCore, loadedImage, inspection, memoryMb);
+        ApplyDefaultCpuInitialization(
+            cpuCore,
+            loadedImage,
+            inspection,
+            memoryMb,
+            lowVectorEntryStubInstalled);
         cpuInitializer?.Invoke(cpuCore);
 
         var report = new RuntimeBootstrapReport(
@@ -150,7 +162,8 @@ public sealed class RuntimeImageBootstrapper
         FrameStack.Emulation.Abstractions.ICpuCore cpuCore,
         LoadedImage loadedImage,
         ImageInspectionResult inspection,
-        int memoryMb)
+        int memoryMb,
+        bool lowVectorEntryStubInstalled)
     {
         if (loadedImage.Architecture != ImageArchitecture.PowerPc32 ||
             loadedImage.Endianness != ImageEndianness.BigEndian ||
@@ -161,6 +174,11 @@ public sealed class RuntimeImageBootstrapper
 
         powerPcCore.Registers[1] = ResolvePowerPcInitialStackPointer(memoryMb, inspection);
         ApplyCiscoPowerPcBootContext(powerPcCore, loadedImage, inspection);
+
+        if (lowVectorEntryStubInstalled)
+        {
+            powerPcCore.NullProgramCounterRedirectEnabled = false;
+        }
     }
 
     private static uint ResolvePowerPcInitialStackPointer(
@@ -199,5 +217,19 @@ public sealed class RuntimeImageBootstrapper
 
         powerPcCore.Registers[3] = CiscoC2600BootMode;
         powerPcCore.Registers[4] = CiscoC2600BootInfoPointer;
+    }
+
+    private static void ApplyCiscoMemoryWriteProtection(
+        SparseMemoryBus memoryBus,
+        ImageInspectionResult inspection)
+    {
+        if (!string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        memoryBus.ProtectWriteRange(
+            CiscoC2600IoMemoryDescriptorAddress,
+            CiscoC2600IoMemoryDescriptorSizeBytes);
     }
 }

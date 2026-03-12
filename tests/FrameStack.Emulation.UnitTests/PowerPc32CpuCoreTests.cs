@@ -756,6 +756,62 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void MemoryAccessTraceSinkShouldCaptureTranslatedDataRead()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+        var events = new List<PowerPcMemoryAccessTraceEntry>();
+
+        memory.WriteUInt32(0x1000, 0x80A3_0000); // lwz r5, 0(r3)
+        memory.WriteUInt32(0x0000_2000, 0xDEAD_BEEF);
+
+        cpu.Reset(0x1000);
+        cpu.WriteMachineStateRegister(0x0000_0010); // Data relocation enabled.
+        cpu.WriteSpecialPurposeRegister(792, 0x0000_0000); // MD_CTR index 0
+        cpu.WriteSpecialPurposeRegister(795, 0x8000_0200); // MD_EPN + valid
+        cpu.WriteSpecialPurposeRegister(797, 0x0000_0000); // 4KB page
+        cpu.WriteSpecialPurposeRegister(798, 0x0000_2000); // MD_RPN
+        cpu.Registers[3] = 0x8000_0000;
+        cpu.MemoryAccessTraceSink = events.Add;
+
+        cpu.ExecuteCycle(memory);
+
+        var access = Assert.Single(events);
+        Assert.Equal(PowerPcMemoryAccessType.Read, access.AccessType);
+        Assert.Equal(0x1000u, access.ProgramCounter);
+        Assert.Equal(0x8000_0000u, access.EffectiveAddress);
+        Assert.Equal(0x0000_2000u, access.PhysicalAddress);
+        Assert.Equal(4, access.SizeBytes);
+        Assert.Equal(0xDEAD_BEEFu, access.Value);
+    }
+
+    [Fact]
+    public void MemoryAccessTraceSinkShouldCaptureDataWrite()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+        var events = new List<PowerPcMemoryAccessTraceEntry>();
+
+        memory.WriteUInt32(0x1000, 0x9083_0000); // stw r4, 0(r3)
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x1200;
+        cpu.Registers[4] = 0xAABB_CCDD;
+        cpu.MemoryAccessTraceSink = events.Add;
+
+        cpu.ExecuteCycle(memory);
+
+        var access = Assert.Single(events);
+        Assert.Equal(PowerPcMemoryAccessType.Write, access.AccessType);
+        Assert.Equal(0x1000u, access.ProgramCounter);
+        Assert.Equal(0x1200u, access.EffectiveAddress);
+        Assert.Equal(0x1200u, access.PhysicalAddress);
+        Assert.Equal(4, access.SizeBytes);
+        Assert.Equal(0xAABB_CCDDu, access.Value);
+        Assert.Equal(0xAABB_CCDDu, memory.ReadUInt32(0x1200));
+    }
+
+    [Fact]
     public void DataLoadShouldDerivePageSizeFromMpc8xxTableWalkControl()
     {
         var cpu = new PowerPc32CpuCore();
@@ -1125,6 +1181,30 @@ public sealed class PowerPc32CpuCoreTests
         cpu.ExecuteCycle(memory);
 
         Assert.Equal(0xAABB_CCEFu, memory.ReadUInt32(0x2000));
+    }
+
+    [Fact]
+    public void SystemCallContextShouldWriteProtectedRangeInsidePrivilegedScope()
+    {
+        var handler = new CallbackSupervisorCallHandler(context =>
+        {
+            Assert.True(context.TryWriteDataUInt32(context.Argument0, 0xAABB_CCDD));
+            return new PowerPcSupervisorCallResult(ReturnValue: 0);
+        });
+
+        var cpu = new PowerPc32CpuCore(handler);
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+        memory.WriteUInt32(0x1000, 0x4400_0002); // sc
+        memory.WriteUInt32(0x2000, 0x1122_3344);
+        memory.ProtectWriteRange(0x2000, 0x10);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x77;
+        cpu.Registers[4] = 0x2000;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xAABB_CCDDu, memory.ReadUInt32(0x2000));
     }
 
     [Fact]

@@ -44,16 +44,21 @@ dotnet run --project src/FrameStack.Api
 Run direct preflight analysis/execution on a local image:
 
 ```bash
-dotnet run --project tools/FrameStack.ImageProbe -- /absolute/path/to/image.bin 200000 256 64 r3=0x1 r4=0x8000BD00
+dotnet run --project tools/FrameStack.ImageProbe -- /absolute/path/to/image.bin \
+  --instruction-budget 200000 \
+  --memory-mb 256 \
+  --timeline-steps 64 \
+  --register r3=0x1 \
+  --register r4=0x8000BD00
 ```
 
 Arguments:
 
 - `image-path`
-- `instruction-budget` (optional, default `2048`)
-- `memory-mb` (optional, default `256`)
-- `timeline-steps` (optional, default `0`)
-- `register=value` overrides (optional, PowerPC only): `r0..r31`, `lr`, `ctr`, `cr`, `xer`, `pc`
+- `--instruction-budget` (optional, default `2048`)
+- `--memory-mb` (optional, default `256`)
+- `--timeline-steps` (optional, default `0`)
+- `--register <register>=<value>` overrides (optional, PowerPC only): `r0..r31`, `lr`, `ctr`, `cr`, `xer`, `pc`
 - optional stop controls:
   - `--stop-at-pc 0x...`
   - `--stop-at-pc-hit 0x...=<hit-count>`
@@ -64,6 +69,9 @@ Arguments:
 - optional trace controls:
   - `--watch32 0x...`
   - `--watch32-reg rN:<offset>`
+  - `--trace-watch32-accesses`
+  - `--trace-watch32-accesses-max <count>`
+  - `--trace-watch32-pc-range <start>:<end>`
   - `--global32 <name>=0x...`
   - `--count-pc 0x...`
   - `--max-hotspots <count>` or `--full-hotspots`
@@ -72,6 +80,7 @@ Arguments:
   - `--report-json /absolute/path/to/report.json`
   - `--profile cisco-c2600-boot` (aliases: `c2600-ram-probe`, `c2600-boot-probe`)
   - `--checkpoint-file <path>` / `--checkpoint-force-rebuild`
+  - `--svc-return-signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>=<value>`
 
 `--stop-on-console-repeat` stops the run when the captured console stream contains the target text at least `<count>` times. When enabled, probe auto-reduces chunk size to improve stop responsiveness.
 
@@ -81,6 +90,7 @@ Probe output includes:
 - explicit stop reason (`InstructionBudgetReached`, `Halted`, stop conditions);
 - exact `count-pc` hit totals (independent from hot spot aggregation);
 - supervisor-call counters/subcall counters;
+- optional read/write memory access trace for watched words (`--trace-watch32-accesses`);
 - captured console stream emitted through firmware monitor calls.
 
 Example (long-run diagnostics with structured report):
