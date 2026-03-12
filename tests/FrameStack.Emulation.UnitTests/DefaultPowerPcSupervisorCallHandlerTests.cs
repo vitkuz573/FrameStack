@@ -33,7 +33,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument2: 0,
             Argument3: 0));
 
-        Assert.Equal(0x1000_0000u, result.ReturnValue);
+        Assert.Equal(0x0040_0000u, result.ReturnValue);
     }
 
     [Fact]

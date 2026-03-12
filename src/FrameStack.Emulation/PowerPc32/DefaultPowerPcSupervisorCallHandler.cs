@@ -32,6 +32,13 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     {
         if (context.ServiceCode == QueryInstalledRamService)
         {
+            if (context.Argument1 == 0 &&
+                context.Argument0 > 0 &&
+                context.Argument0 <= _reportedMemoryBytes)
+            {
+                return new PowerPcSupervisorCallResult(ReturnValue: context.Argument0);
+            }
+
             return new PowerPcSupervisorCallResult(ReturnValue: _reportedMemoryBytes);
         }
 
