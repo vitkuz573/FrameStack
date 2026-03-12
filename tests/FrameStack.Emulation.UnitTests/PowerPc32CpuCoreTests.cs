@@ -669,6 +669,56 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void DataLoadShouldPreserveHighBitFor8MbMappingsByDefault()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x2000, 0x80A3_0000); // lwz r5, 0(r3)
+        memory.WriteUInt32(0x8000_1000, 0xAABB_CCDD);
+        memory.WriteUInt32(0x0000_1000, 0x1122_3344);
+
+        cpu.Reset(0x2000);
+        cpu.WriteMachineStateRegister(0x0000_0010); // Data relocation enabled.
+        cpu.WriteSpecialPurposeRegister(792, 0x0000_0000); // MD_CTR index 0
+        cpu.WriteSpecialPurposeRegister(795, 0x8000_0200); // MD_EPN + valid
+        cpu.WriteSpecialPurposeRegister(797, 0x0000_000C); // MD_TWC page size = 8MB
+        cpu.WriteSpecialPurposeRegister(798, 0x0000_0000); // MD_RPN base
+        cpu.Registers[3] = 0x8000_1000;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xAABB_CCDDu, cpu.Registers[5]);
+    }
+
+    [Fact]
+    public void DataLoadShouldAllowDisablingHighBitPreservationFor8MbMappings()
+    {
+        var cpu = new PowerPc32CpuCore
+        {
+            PreserveHighBitOn8MbTranslation = false
+        };
+
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x2000, 0x80A3_0000); // lwz r5, 0(r3)
+        memory.WriteUInt32(0x8000_1000, 0xAABB_CCDD);
+        memory.WriteUInt32(0x0000_1000, 0x1122_3344);
+
+        cpu.Reset(0x2000);
+        cpu.WriteMachineStateRegister(0x0000_0010); // Data relocation enabled.
+        cpu.WriteSpecialPurposeRegister(792, 0x0000_0000); // MD_CTR index 0
+        cpu.WriteSpecialPurposeRegister(795, 0x8000_0200); // MD_EPN + valid
+        cpu.WriteSpecialPurposeRegister(797, 0x0000_000C); // MD_TWC page size = 8MB
+        cpu.WriteSpecialPurposeRegister(798, 0x0000_0000); // MD_RPN base
+        cpu.Registers[3] = 0x8000_1000;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1122_3344u, cpu.Registers[5]);
+    }
+
+    [Fact]
     public void InstructionFetchShouldUseInstalledMpc8xxInstructionTlbEntryWhenRelocationEnabled()
     {
         var cpu = new PowerPc32CpuCore();

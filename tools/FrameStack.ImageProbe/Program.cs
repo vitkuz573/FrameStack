@@ -27,7 +27,7 @@ if (args.Length == 0)
         "[--window <address>:<before>:<after>] [--watch32 <address>] [--stop-on-watch32-change <address>] " +
         "[--watch32-reg <reg>:<offset>] [--watch32-ea <effective-address>] [--stop-on-watch32-change-reg <reg>:<offset>] [--stop-on-watch32-change-ea <effective-address>] [--global32 <name>=<address>] [--global32-ea <name>=<effective-address>] " +
         "[--count-pc <address>] [--stop-at-pc-hit <address>=<hit-count>] [--max-hotspots <count>] [--full-hotspots] " +
-        "[--progress-every <instructions>] [--report-json <path>] [--profile <name>] [--disable-null-pc-redirect]");
+        "[--progress-every <instructions>] [--report-json <path>] [--profile <name>] [--disable-null-pc-redirect] [--disable-8mb-high-bit-alias]");
     return 1;
 }
 
@@ -207,6 +207,11 @@ if (cliOptions.DisableNullProgramCounterRedirect)
     Console.WriteLine("DisableNullPcRedirect: True");
 }
 
+if (cliOptions.Disable8MbHighBitAlias)
+{
+    Console.WriteLine("Disable8MbHighBitAlias: True");
+}
+
 if (TryMapVirtualAddressToFileOffset(inspection.Sections, inspection.EntryPoint, out var entryOffset))
 {
     Console.WriteLine($"EntryOffset: 0x{entryOffset:X8}");
@@ -291,6 +296,11 @@ try
         if (cliOptions.DisableNullProgramCounterRedirect)
         {
             powerPcCore.NullProgramCounterRedirectEnabled = false;
+        }
+
+        if (cliOptions.Disable8MbHighBitAlias)
+        {
+            powerPcCore.PreserveHighBitOn8MbTranslation = false;
         }
 
         if (cliOptions.SupervisorReturnOverrides.Count > 0 ||
@@ -705,10 +715,13 @@ catch (Exception exception)
     Console.WriteLine("Preflight Run Failed:");
     Console.WriteLine(exception.Message);
 
-    if (exception.InnerException is not null)
+    var inner = exception.InnerException;
+
+    while (inner is not null)
     {
         Console.WriteLine("InnerException:");
-        Console.WriteLine(exception.InnerException.Message);
+        Console.WriteLine(inner.Message);
+        inner = inner.InnerException;
     }
 
     return 3;
@@ -757,6 +770,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
     var maxHotSpots = DefaultMaxHotSpots;
     var progressEveryInstructions = 0L;
     var disableNullProgramCounterRedirect = false;
+    var disable8MbHighBitAlias = false;
     uint? stopAtProgramCounter = null;
     uint? stopOnSupervisorService = null;
     var stopAtProgramCounterHits = new Dictionary<uint, long>();
@@ -843,6 +857,9 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
                 break;
             case "--disable-null-pc-redirect":
                 disableNullProgramCounterRedirect = true;
+                break;
+            case "--disable-8mb-high-bit-alias":
+                disable8MbHighBitAlias = true;
                 break;
             case "--svc-return":
                 optionValue ??= ReadRequiredOptionValue(tokens, ref index, optionName);
@@ -964,6 +981,7 @@ static ProbeCliOptions ParseProbeCliOptions(string[] tokens)
         namedGlobalEffectiveAddresses,
         profileNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray(),
         disableNullProgramCounterRedirect,
+        disable8MbHighBitAlias,
         registerOverrideTokens.ToArray());
 }
 
@@ -3254,6 +3272,7 @@ file sealed record ProbeCliOptions(
     IReadOnlyList<NamedAddress> NamedGlobalEffectiveAddresses,
     IReadOnlyList<string> ProfileNames,
     bool DisableNullProgramCounterRedirect,
+    bool Disable8MbHighBitAlias,
     string[] RegisterOverrideTokens);
 
 file sealed record TracedRunResult(

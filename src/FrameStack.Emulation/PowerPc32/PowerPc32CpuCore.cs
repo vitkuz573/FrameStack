@@ -79,6 +79,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     public bool NullProgramCounterRedirectEnabled { get; set; } = true;
 
+    public bool PreserveHighBitOn8MbTranslation { get; set; } = true;
+
     public IReadOnlyList<PowerPc32TlbEntryState> GetInstructionTlbEntries()
     {
         return CaptureTlbEntries(_instructionTlb);
@@ -1559,7 +1561,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
             return effectiveAddress;
         }
 
-        return TranslateAddress(effectiveAddress, _instructionTlb);
+        return TranslateAddress(
+            effectiveAddress,
+            _instructionTlb,
+            PreserveHighBitOn8MbTranslation);
     }
 
     private uint TranslateDataAddress(uint effectiveAddress)
@@ -1569,10 +1574,16 @@ public sealed class PowerPc32CpuCore : ICpuCore
             return effectiveAddress;
         }
 
-        return TranslateAddress(effectiveAddress, _dataTlb);
+        return TranslateAddress(
+            effectiveAddress,
+            _dataTlb,
+            PreserveHighBitOn8MbTranslation);
     }
 
-    private static uint TranslateAddress(uint effectiveAddress, IReadOnlyList<Mpc8xxTlbEntry?> tlb)
+    private static uint TranslateAddress(
+        uint effectiveAddress,
+        IReadOnlyList<Mpc8xxTlbEntry?> tlb,
+        bool preserveHighBitOn8MbTranslation)
     {
         for (var index = 0; index < tlb.Count; index++)
         {
@@ -1594,7 +1605,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
             var translatedPageBase = entry.Value.RealPageNumber & pageBaseMask;
 
-            if (pageSize == 8u * 1024u * 1024u &&
+            if (preserveHighBitOn8MbTranslation &&
+                pageSize == 8u * 1024u * 1024u &&
                 (translatedPageBase & 0x8000_0000u) == 0 &&
                 (entry.Value.EffectivePageNumber & 0x8000_0000u) != 0)
             {
