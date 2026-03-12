@@ -1,5 +1,6 @@
 using FrameStack.Emulation.Core;
 using FrameStack.Emulation.Images;
+using FrameStack.Emulation.Abstractions;
 using FrameStack.Emulation.Memory;
 using FrameStack.Emulation.Mips32;
 using FrameStack.Emulation.PowerPc32;
@@ -9,8 +10,7 @@ namespace FrameStack.Emulation.Runtime;
 public sealed class RuntimeImageBootstrapper
 {
     private const uint OneMbInBytes = 1024u * 1024u;
-    // C2600 boot firmware expects classic 64MB ceiling for stable IOMEM negotiation.
-    private const int CiscoC2600ReportedMemoryMaxMb = 64;
+    private const int CiscoC2600ReportedMemoryMaxMb = 128;
     private const uint CiscoC2600BootMode = 1;
     private const uint CiscoC2600BootInfoPointer = 0x8000_BD00;
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
@@ -43,19 +43,20 @@ public sealed class RuntimeImageBootstrapper
         var loader = ResolveLoader(inspection);
         var loadedImage = loader.Load(imageBytes, inspection, ImageLoadOptions.Default);
 
-        var memoryBus = new SparseMemoryBus((ulong)memoryMb * 1024UL * 1024UL);
+        var ramBus = new SparseMemoryBus((ulong)memoryMb * 1024UL * 1024UL);
 
         foreach (var segment in loadedImage.Segments)
         {
-            memoryBus.LoadBytes(segment.VirtualAddress, segment.Data);
+            ramBus.LoadBytes(segment.VirtualAddress, segment.Data);
         }
 
-        ApplyCiscoMemoryWriteProtection(memoryBus, inspection);
+        ApplyCiscoMemoryWriteProtection(ramBus, inspection);
+        var machineMemoryBus = BuildMachineMemoryBus(ramBus, inspection);
 
         var lowVectorEntryStubInstalled =
-            CiscoPowerPcLowVectorBootstrap.TryInstallEntryStub(memoryBus, inspection, loadedImage.EntryPoint);
+            CiscoPowerPcLowVectorBootstrap.TryInstallEntryStub(machineMemoryBus, inspection, loadedImage.EntryPoint);
         var cpuCore = CreateCpuCore(loadedImage, inspection, memoryMb);
-        var machine = new EmulationMachine(cpuCore, memoryBus, loadedImage.EntryPoint);
+        var machine = new EmulationMachine(cpuCore, machineMemoryBus, loadedImage.EntryPoint);
 
         ApplyDefaultCpuInitialization(
             cpuCore,
@@ -121,32 +122,23 @@ public sealed class RuntimeImageBootstrapper
             $"Unsupported architecture/endian pair: {loadedImage.Architecture}/{loadedImage.Endianness}.");
     }
 
+    private static uint ResolvePowerPcReportedMemoryBytes(int memoryMb)
+    {
+        return checked((uint)memoryMb * OneMbInBytes);
+    }
+
     private static uint ResolvePowerPcReportedMemoryBytes(
         int memoryMb,
         ImageInspectionResult inspection)
     {
         var effectiveMemoryMb = memoryMb;
 
-        if (TryResolveCiscoPowerPcReportedMemoryProfileLimitMb(inspection.CiscoFamily, out var profileLimitMb))
+        if (string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
         {
-            effectiveMemoryMb = Math.Min(effectiveMemoryMb, profileLimitMb);
+            effectiveMemoryMb = Math.Min(effectiveMemoryMb, CiscoC2600ReportedMemoryMaxMb);
         }
 
-        return checked((uint)effectiveMemoryMb * OneMbInBytes);
-    }
-
-    private static bool TryResolveCiscoPowerPcReportedMemoryProfileLimitMb(
-        string? ciscoFamily,
-        out int limitMb)
-    {
-        if (string.Equals(ciscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
-        {
-            limitMb = CiscoC2600ReportedMemoryMaxMb;
-            return true;
-        }
-
-        limitMb = 0;
-        return false;
+        return ResolvePowerPcReportedMemoryBytes(effectiveMemoryMb);
     }
 
     private static CiscoPowerPcNullProgramCounterRedirectPolicy? ResolvePowerPcNullProgramCounterRedirectPolicy(
@@ -173,7 +165,7 @@ public sealed class RuntimeImageBootstrapper
         }
 
         powerPcCore.Registers[1] = ResolvePowerPcInitialStackPointer(memoryMb, inspection);
-        ApplyCiscoPowerPcBootContext(powerPcCore, loadedImage, inspection);
+        ApplyCiscoPowerPcBootContext(powerPcCore, loadedImage, inspection, lowVectorEntryStubInstalled);
 
         if (lowVectorEntryStubInstalled)
         {
@@ -191,7 +183,7 @@ public sealed class RuntimeImageBootstrapper
         }
 
         const uint stackGuardBytes = 0x1000;
-        var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb, inspection);
+        var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb);
 
         return topOfRam > stackGuardBytes
             ? topOfRam - stackGuardBytes
@@ -201,13 +193,16 @@ public sealed class RuntimeImageBootstrapper
     private static void ApplyCiscoPowerPcBootContext(
         PowerPc32CpuCore powerPcCore,
         LoadedImage loadedImage,
-        ImageInspectionResult inspection)
+        ImageInspectionResult inspection,
+        bool lowVectorEntryStubInstalled)
     {
         if (!string.IsNullOrWhiteSpace(inspection.CiscoFamily))
         {
-            // Cisco ROM wrappers transfer control to IOS as a subroutine.
-            // Seeding LR to entrypoint keeps early bootstrap returns away from a null vector.
-            powerPcCore.Registers.Lr = loadedImage.EntryPoint;
+            // When low-vector entry stub is present, IOS bootstrap returns through
+            // LR and expects 0x00000000 -> low-vector trampoline, not entrypoint self-recursion.
+            powerPcCore.Registers.Lr = lowVectorEntryStubInstalled
+                ? 0u
+                : loadedImage.EntryPoint;
         }
 
         if (!string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
@@ -231,5 +226,19 @@ public sealed class RuntimeImageBootstrapper
         memoryBus.ProtectWriteRange(
             CiscoC2600IoMemoryDescriptorAddress,
             CiscoC2600IoMemoryDescriptorSizeBytes);
+    }
+
+    private static IMemoryBus BuildMachineMemoryBus(
+        SparseMemoryBus ramBus,
+        ImageInspectionResult inspection)
+    {
+        if (!string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
+        {
+            return ramBus;
+        }
+
+        var mappedBus = new MemoryMappedBus(ramBus);
+        mappedBus.RegisterDevice(new CiscoC2600PortAdapterIoDevice());
+        return mappedBus;
     }
 }

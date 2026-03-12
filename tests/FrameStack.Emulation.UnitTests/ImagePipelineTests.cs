@@ -1,4 +1,5 @@
 using System.Text;
+using FrameStack.Emulation.Abstractions;
 using FrameStack.Emulation.Images;
 using FrameStack.Emulation.Memory;
 using FrameStack.Emulation.PowerPc32;
@@ -137,8 +138,36 @@ public sealed class ImagePipelineTests
         Assert.Equal(0x80006000u, powerPc.Registers[1]);
         Assert.Equal(1u, powerPc.Registers[3]);
         Assert.Equal(0x8000BD00u, powerPc.Registers[4]);
-        Assert.Equal(0x80008000u, powerPc.Registers.Lr);
+        Assert.Equal(0u, powerPc.Registers.Lr);
         Assert.False(powerPc.NullProgramCounterRedirectEnabled);
+    }
+
+    [Fact]
+    public void BootstrapShouldInstallCiscoC2600PortAdapterMappedIoDevice()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-c2600-mmio-device",
+            imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
+            memoryMb: 128);
+
+        var mappedBus = Assert.IsType<MemoryMappedBus>(state.Machine.MemoryBus);
+
+        // Assert select and perform two read clocks.
+        mappedBus.WriteByte(0x6740_001C, 0x10);
+        mappedBus.WriteByte(0x6740_001C, 0x14);
+        var firstBitSample = mappedBus.ReadByte(0x6740_001C);
+        mappedBus.WriteByte(0x6740_001C, 0x10);
+        mappedBus.WriteByte(0x6740_001C, 0x14);
+        var secondBitSample = mappedBus.ReadByte(0x6740_001C);
+        mappedBus.WriteByte(0x6740_001C, 0x10);
+
+        Assert.Equal((byte)0x80, mappedBus.ReadByte(0x6740_0014));
+        Assert.True((firstBitSample & 0x80) != 0);
+        Assert.True((secondBitSample & 0x80) == 0);
     }
 
     [Fact]
@@ -158,7 +187,7 @@ public sealed class ImagePipelineTests
         Assert.Equal(0x07FFF000u, powerPc.Registers[1]);
         Assert.Equal(0u, powerPc.Registers[3]);
         Assert.Equal(0u, powerPc.Registers[4]);
-        Assert.Equal(0x80008000u, powerPc.Registers.Lr);
+        Assert.Equal(0u, powerPc.Registers.Lr);
         Assert.False(powerPc.NullProgramCounterRedirectEnabled);
     }
 
@@ -253,7 +282,7 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
-    public void BootstrapShouldUseCiscoMemoryProfileForPowerPcSupervisorService()
+    public void BootstrapShouldClampPowerPcSupervisorMemoryForCiscoC2600Profile()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
             new BinaryImageAnalyzer(),
@@ -268,11 +297,11 @@ public sealed class ImagePipelineTests
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
         Assert.Equal(2, summary.ExecutedInstructions);
-        Assert.Equal(64u * 1024u * 1024u, powerPc.Registers[3]);
+        Assert.Equal(128u * 1024u * 1024u, powerPc.Registers[3]);
     }
 
     [Fact]
-    public void BootstrapShouldNotOverReportPowerPcSupervisorMemoryWhenAllocationIsBelowCiscoProfile()
+    public void BootstrapShouldReportAllocatedPowerPcSupervisorMemoryForCiscoImagesAtLowerBound()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
             new BinaryImageAnalyzer(),
@@ -302,7 +331,7 @@ public sealed class ImagePipelineTests
             imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
             memoryMb: 128);
 
-        var memoryBus = Assert.IsType<SparseMemoryBus>(state.Machine.MemoryBus);
+        var memoryBus = ResolveSparseMemoryBus(state.Machine.MemoryBus);
 
         using (memoryBus.BeginPrivilegedWriteScope())
         {
@@ -374,6 +403,23 @@ public sealed class ImagePipelineTests
         image[0x87] = 0x0D; // break
 
         return image;
+    }
+
+    private static SparseMemoryBus ResolveSparseMemoryBus(IMemoryBus memoryBus)
+    {
+        if (memoryBus is SparseMemoryBus sparseMemoryBus)
+        {
+            return sparseMemoryBus;
+        }
+
+        if (memoryBus is MemoryMappedBus mappedBus &&
+            mappedBus.BackingBus is SparseMemoryBus mappedSparseMemoryBus)
+        {
+            return mappedSparseMemoryBus;
+        }
+
+        throw new NotSupportedException(
+            $"Expected SparseMemoryBus-backed runtime memory, got '{memoryBus.GetType().Name}'.");
     }
 
     private static byte[] CreateSparcTaggedPowerPcElf(
