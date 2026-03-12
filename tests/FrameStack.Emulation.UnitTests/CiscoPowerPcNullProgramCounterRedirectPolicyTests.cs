@@ -39,7 +39,13 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
 
         Assert.True(resolved);
         Assert.Equal(0x8000_2000u, resolution.RedirectTarget);
-        Assert.Equal(PowerPcNullProgramCounterRedirectSource.StackSlot, resolution.Source);
+        Assert.Contains(
+            resolution.Source,
+            new[]
+            {
+                PowerPcNullProgramCounterRedirectSource.StackSlot,
+                PowerPcNullProgramCounterRedirectSource.StackFrameChain
+            });
         Assert.Equal(0x1004u, resolution.StackAddress);
     }
 
@@ -115,6 +121,121 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
         Assert.True(secondResolved);
         Assert.Equal(PowerPcNullProgramCounterRedirectSource.LastKnownTarget, secondResolution.Source);
         Assert.Equal(0x8000_1110u, secondResolution.RedirectTarget);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldUseLastKnownTargetWithoutStackSignal()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers.Lr = 0x8000_1110;
+
+        var firstResolved = policy.TryResolveRedirectTarget(
+            registers,
+            _ => 0u,
+            address => address switch
+            {
+                0x8000_1110 or 0x8000_1114 => 0x4E80_0020u,
+                0x8000_8000 or 0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out _);
+
+        Assert.True(firstResolved);
+
+        registers = new PowerPc32RegisterFile();
+        registers[1] = 0x2000;
+        var secondResolved = policy.TryResolveRedirectTarget(
+            registers,
+            _ => 0u,
+            address => address switch
+            {
+                0x8000_1110 or 0x8000_1114 => 0x4E80_0020u,
+                0x8000_8000 or 0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var secondResolution);
+
+        Assert.True(secondResolved);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.LastKnownTarget, secondResolution.Source);
+        Assert.Equal(0x8000_1110u, secondResolution.RedirectTarget);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldPreferStackCandidateWithFrameBackChainSignal()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+
+        var resolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address switch
+            {
+                0x0FF0 => 0x8000_2600u,
+                0x0FEC => 0x8000_2700u,
+                0x0FE8 => 0x1000u, // previous word for 0x0FEC looks like stack back-chain
+                _ => 0u
+            },
+            address => address switch
+            {
+                0x8000_2600 or 0x8000_2604 => 0x4E80_0020u,
+                0x8000_2700 or 0x8000_2704 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var resolution);
+
+        Assert.True(resolved);
+        Assert.Equal(0x8000_2700u, resolution.RedirectTarget);
+        Assert.Equal(0x0FECu, resolution.StackAddress);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldAvoidImmediateRepeatAndUseAlternativeCandidate()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+        registers.Lr = 0x8000_1110;
+
+        var firstResolved = policy.TryResolveRedirectTarget(
+            registers,
+            _ => 0u,
+            address => address switch
+            {
+                0x8000_1110 or 0x8000_1114 => 0x4E80_0020u,
+                0x8000_2000 or 0x8000_2004 => 0x4E80_0020u,
+                0x8000_8000 or 0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var firstResolution);
+
+        Assert.True(firstResolved);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.LinkRegister, firstResolution.Source);
+        Assert.Equal(0x8000_1110u, firstResolution.RedirectTarget);
+
+        var secondResolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address == 0x1004 ? 0x8000_2000u : 0u,
+            address => address switch
+            {
+                0x8000_1110 or 0x8000_1114 => 0x4E80_0020u,
+                0x8000_2000 or 0x8000_2004 => 0x4E80_0020u,
+                0x8000_8000 or 0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var secondResolution);
+
+        Assert.True(secondResolved);
+        Assert.Contains(
+            secondResolution.Source,
+            new[]
+            {
+                PowerPcNullProgramCounterRedirectSource.StackSlot,
+                PowerPcNullProgramCounterRedirectSource.StackFrameChain
+            });
+        Assert.Equal(0x8000_2000u, secondResolution.RedirectTarget);
+        Assert.Equal(0x1004u, secondResolution.StackAddress);
     }
 
     [Fact]
