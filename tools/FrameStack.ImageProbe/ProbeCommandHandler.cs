@@ -16,6 +16,7 @@ internal static class ProbeCommandHandler
     private const int DefaultTailLength = 64;
     private const int DefaultMaxHotSpots = 4096;
     private const int DefaultMaxMemoryAccessWatchEvents = 4096;
+    private const int DefaultMaxInstructionTraceEvents = 4096;
 
     internal static bool TryParse(
         string[] args,
@@ -105,6 +106,8 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.TraceWatch32Accesses);
         command.Options.Add(CliOptions.TraceWatch32AccessesMaxEvents);
         command.Options.Add(CliOptions.TraceWatch32ProgramCounterRanges);
+        command.Options.Add(CliOptions.TraceInstructionProgramCounterRanges);
+        command.Options.Add(CliOptions.TraceInstructionMaxEvents);
         command.Options.Add(CliOptions.TrackedProgramCounters);
         command.Options.Add(CliOptions.NamedGlobalAddresses);
         command.Options.Add(CliOptions.NamedGlobalEffectiveAddresses);
@@ -275,6 +278,19 @@ internal static class ProbeCommandHandler
                 ParseAddressRange("--trace-watch32-pc-range", token));
         }
 
+        var traceInstructionProgramCounterRanges = new List<AddressRange>();
+        foreach (var token in parseResult.GetValue(CliOptions.TraceInstructionProgramCounterRanges) ?? [])
+        {
+            AddDistinct(
+                traceInstructionProgramCounterRanges,
+                ParseAddressRange("--trace-insn-pc-range", token));
+        }
+
+        var traceInstructionMaxEventsValue = parseResult.GetValue(CliOptions.TraceInstructionMaxEvents);
+        var traceInstructionMaxEvents = traceInstructionMaxEventsValue.HasValue
+            ? EnsureNonNegativeInt("--trace-insn-max", traceInstructionMaxEventsValue.Value)
+            : DefaultMaxInstructionTraceEvents;
+
         var trackedProgramCounters = new List<uint>();
         foreach (var token in parseResult.GetValue(CliOptions.TrackedProgramCounters) ?? [])
         {
@@ -340,6 +356,8 @@ internal static class ProbeCommandHandler
             parseResult.GetValue(CliOptions.TraceWatch32Accesses),
             traceWatch32AccessesMaxEvents,
             traceWatch32ProgramCounterRanges,
+            traceInstructionProgramCounterRanges,
+            traceInstructionMaxEvents,
             trackedProgramCounters,
             namedGlobalAddresses,
             namedGlobalEffectiveAddresses,

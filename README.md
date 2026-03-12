@@ -72,6 +72,8 @@ Arguments:
   - `--trace-watch32-accesses`
   - `--trace-watch32-accesses-max <count>`
   - `--trace-watch32-pc-range <start>:<end>`
+  - `--trace-insn-pc-range <start>:<end>`
+  - `--trace-insn-max <count>`
   - `--global32 <name>=0x...`
   - `--count-pc 0x...`
   - `--max-hotspots <count>` or `--full-hotspots`
@@ -91,12 +93,16 @@ Probe output includes:
 - exact `count-pc` hit totals (independent from hot spot aggregation);
 - supervisor-call counters/subcall counters;
 - optional read/write memory access trace for watched words (`--trace-watch32-accesses`);
+- optional per-instruction register deltas for selected PC ranges (`--trace-insn-pc-range`);
 - captured console stream emitted through firmware monitor calls.
 
 Example (long-run diagnostics with structured report):
 
 ```bash
-dotnet run --project tools/FrameStack.ImageProbe -- /path/to/cisco.bin 500000000 256 0 \
+dotnet run --project tools/FrameStack.ImageProbe -- /path/to/cisco.bin \
+  --instruction-budget 500000000 \
+  --memory-mb 256 \
+  --timeline-steps 0 \
   --checkpoint-file .tmp/checkpoints/c2600.chk \
   --profile cisco-c2600-boot \
   --count-pc 0x816E292C \

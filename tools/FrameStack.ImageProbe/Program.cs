@@ -160,6 +160,13 @@ if (cliOptions.TraceWatch32ProgramCounterRanges.Count > 0)
         $"TraceWatch32PcRange: {string.Join(", ", cliOptions.TraceWatch32ProgramCounterRanges.Select(range => $"0x{range.Start:X8}:0x{range.End:X8}"))}");
 }
 
+if (cliOptions.TraceInstructionProgramCounterRanges.Count > 0)
+{
+    Console.WriteLine(
+        $"TraceInstructionPcRange: {string.Join(", ", cliOptions.TraceInstructionProgramCounterRanges.Select(range => $"0x{range.Start:X8}:0x{range.End:X8}"))}");
+    Console.WriteLine($"TraceInstructionMax: {cliOptions.TraceInstructionMaxEvents}");
+}
+
 if (cliOptions.NamedGlobalAddresses.Count > 0)
 {
     Console.WriteLine(
@@ -429,6 +436,8 @@ try
         cliOptions.TraceWatch32Accesses,
         cliOptions.TraceWatch32AccessesMaxEvents,
         cliOptions.TraceWatch32ProgramCounterRanges,
+        cliOptions.TraceInstructionProgramCounterRanges,
+        cliOptions.TraceInstructionMaxEvents,
         powerPcCore,
         cliOptions.ProgressEveryInstructions,
         () =>
@@ -598,20 +607,38 @@ try
         }
     }
 
-    if (traceRun.MemoryAccessEvents.Count > 0)
-    {
-        Console.WriteLine("MemoryAccessEvents:");
+if (traceRun.MemoryAccessEvents.Count > 0)
+{
+    Console.WriteLine("MemoryAccessEvents:");
 
         foreach (var accessEvent in traceRun.MemoryAccessEvents)
         {
             Console.WriteLine(
                 $"  PC=0x{accessEvent.ProgramCounter:X8} TYPE={accessEvent.AccessType} SIZE={accessEvent.SizeBytes} " +
                 $"EA=0x{accessEvent.EffectiveAddress:X8} PA=0x{accessEvent.PhysicalAddress:X8} VALUE=0x{accessEvent.Value:X8}");
-        }
     }
+}
 
-    if (powerPcCore is not null)
+if (traceRun.InstructionTraceEvents.Count > 0)
+{
+    Console.WriteLine("InstructionTraceEvents:");
+
+    foreach (var traceEvent in traceRun.InstructionTraceEvents)
     {
+        var deltas = traceEvent.RegisterDeltas.Count == 0
+            ? "<no-register-delta>"
+            : string.Join(
+                ", ",
+                traceEvent.RegisterDeltas.Select(delta =>
+                    $"{delta.RegisterName}:0x{delta.BeforeValue:X8}->0x{delta.AfterValue:X8}"));
+        Console.WriteLine(
+            $"  PC=0x{traceEvent.ProgramCounterBefore:X8} NEXT=0x{traceEvent.ProgramCounterAfter:X8} " +
+            $"INSN=0x{traceEvent.InstructionWord:X8} {traceEvent.Description} DELTA={deltas}");
+    }
+}
+
+if (powerPcCore is not null)
+{
         Console.WriteLine(
             $"FinalRegisters: R0=0x{powerPcCore.Registers[0]:X8} R1=0x{powerPcCore.Registers[1]:X8} R3=0x{powerPcCore.Registers[3]:X8} R4=0x{powerPcCore.Registers[4]:X8} R5=0x{powerPcCore.Registers[5]:X8} " +
             $"R6=0x{powerPcCore.Registers[6]:X8} R7=0x{powerPcCore.Registers[7]:X8} " +
@@ -1164,6 +1191,71 @@ static bool IsMemoryAccessWithinRanges(
     return false;
 }
 
+static PowerPcTraceSnapshot CapturePowerPcTraceSnapshot(PowerPc32CpuCore core)
+{
+    var generalPurposeRegisters = new uint[32];
+
+    for (var index = 0; index < generalPurposeRegisters.Length; index++)
+    {
+        generalPurposeRegisters[index] = core.Registers[index];
+    }
+
+    return new PowerPcTraceSnapshot(
+        generalPurposeRegisters,
+        core.Registers.Lr,
+        core.Registers.Ctr,
+        core.Registers.Cr,
+        core.Registers.Xer,
+        core.MachineStateRegister);
+}
+
+static IReadOnlyList<PowerPcRegisterDelta> BuildPowerPcRegisterDeltas(
+    PowerPcTraceSnapshot before,
+    PowerPcTraceSnapshot after)
+{
+    var deltas = new List<PowerPcRegisterDelta>(40);
+
+    for (var index = 0; index < before.GeneralPurposeRegisters.Length; index++)
+    {
+        var beforeValue = before.GeneralPurposeRegisters[index];
+        var afterValue = after.GeneralPurposeRegisters[index];
+
+        if (beforeValue == afterValue)
+        {
+            continue;
+        }
+
+        deltas.Add(new PowerPcRegisterDelta($"r{index}", beforeValue, afterValue));
+    }
+
+    if (before.LinkRegister != after.LinkRegister)
+    {
+        deltas.Add(new PowerPcRegisterDelta("lr", before.LinkRegister, after.LinkRegister));
+    }
+
+    if (before.CounterRegister != after.CounterRegister)
+    {
+        deltas.Add(new PowerPcRegisterDelta("ctr", before.CounterRegister, after.CounterRegister));
+    }
+
+    if (before.ConditionRegister != after.ConditionRegister)
+    {
+        deltas.Add(new PowerPcRegisterDelta("cr", before.ConditionRegister, after.ConditionRegister));
+    }
+
+    if (before.FixedPointExceptionRegister != after.FixedPointExceptionRegister)
+    {
+        deltas.Add(new PowerPcRegisterDelta("xer", before.FixedPointExceptionRegister, after.FixedPointExceptionRegister));
+    }
+
+    if (before.MachineStateRegister != after.MachineStateRegister)
+    {
+        deltas.Add(new PowerPcRegisterDelta("msr", before.MachineStateRegister, after.MachineStateRegister));
+    }
+
+    return deltas;
+}
+
 static TracedRunResult RunBudgetWithTrace(
     EmulationMachine machine,
     long budget,
@@ -1183,6 +1275,8 @@ static TracedRunResult RunBudgetWithTrace(
     bool traceWatchWordAccesses,
     int traceWatchWordAccessesMaxEvents,
     IReadOnlyList<AddressRange> traceWatchWordProgramCounterRanges,
+    IReadOnlyList<AddressRange> traceInstructionProgramCounterRanges,
+    int traceInstructionMaxEvents,
     PowerPc32CpuCore? powerPcCore,
     long progressEveryInstructions,
     Func<ExecutionStopReason?>? stopEvaluator,
@@ -1207,6 +1301,12 @@ static TracedRunResult RunBudgetWithTrace(
                              powerPcCore is not null
         ? new List<PowerPcMemoryAccessTraceEntry>()
         : null;
+    var instructionTraceEvents = powerPcCore is not null &&
+                                 traceInstructionProgramCounterRanges.Count > 0 &&
+                                 traceInstructionMaxEvents > 0
+        ? new List<PowerPcInstructionTraceEvent>()
+        : null;
+    var instructionTraceEnabled = instructionTraceEvents is not null;
     HashSet<uint>? trackedProgramCounterSet = null;
     var runStopwatch = Stopwatch.StartNew();
     var nextProgressCheckpoint = progressEveryInstructions > 0
@@ -1222,6 +1322,26 @@ static TracedRunResult RunBudgetWithTrace(
     while (remaining > 0 && !machine.Halted)
     {
         var currentChunk = (int)Math.Min(remaining, chunkBudget);
+
+        if (instructionTraceEnabled && currentChunk > 1)
+        {
+            // Step one instruction at a time when instruction tracing is enabled.
+            currentChunk = 1;
+        }
+
+        var traceProgramCounterBefore = 0u;
+        var traceInstructionWord = 0u;
+        PowerPcTraceSnapshot? traceSnapshotBefore = null;
+
+        if (instructionTraceEnabled &&
+            instructionTraceEvents!.Count < traceInstructionMaxEvents &&
+            IsProgramCounterInRanges(machine.ProgramCounter, traceInstructionProgramCounterRanges))
+        {
+            traceProgramCounterBefore = machine.ProgramCounter;
+            traceInstructionWord = machine.ReadUInt32(traceProgramCounterBefore);
+            traceSnapshotBefore = CapturePowerPcTraceSnapshot(powerPcCore!);
+        }
+
         currentWatchWordAddresses = ResolveWatchWordAddresses(
             staticWatchWordAddresses,
             dynamicWatchWordRequests,
@@ -1558,6 +1678,22 @@ static TracedRunResult RunBudgetWithTrace(
 
         var chunkExecuted = traceSummary.Summary.ExecutedInstructions;
 
+        if (traceSnapshotBefore.HasValue &&
+            chunkExecuted > 0 &&
+            instructionTraceEvents is not null)
+        {
+            var traceSnapshotAfter = CapturePowerPcTraceSnapshot(powerPcCore!);
+            var registerDeltas = BuildPowerPcRegisterDeltas(traceSnapshotBefore.Value, traceSnapshotAfter);
+            var description = DescribeInstruction(traceProgramCounterBefore, traceInstructionWord);
+
+            instructionTraceEvents.Add(new PowerPcInstructionTraceEvent(
+                traceProgramCounterBefore,
+                machine.ProgramCounter,
+                traceInstructionWord,
+                description,
+                registerDeltas));
+        }
+
         executed += chunkExecuted;
         remaining -= chunkExecuted;
         MergeHotSpots(hotSpotCounters, traceSummary.HotSpots);
@@ -1629,7 +1765,8 @@ static TracedRunResult RunBudgetWithTrace(
         tail?.ToArray() ?? Array.Empty<uint>(),
         stopReason,
         memoryWatchEvents?.ToArray() ?? Array.Empty<MemoryWatchTraceEntry>(),
-        memoryAccessEvents?.ToArray() ?? Array.Empty<PowerPcMemoryAccessTraceEntry>());
+        memoryAccessEvents?.ToArray() ?? Array.Empty<PowerPcMemoryAccessTraceEntry>(),
+        instructionTraceEvents?.ToArray() ?? Array.Empty<PowerPcInstructionTraceEvent>());
 }
 
 static ProbeCheckpoint CreateCheckpoint(
@@ -2055,8 +2192,10 @@ static string DescribeInstruction(uint programCounter, uint instructionWord)
         14 => DescribeAddImmediate(instructionWord),
         15 => DescribeAddImmediateShifted(instructionWord),
         16 => DescribeConditionalBranch(programCounter, instructionWord),
+        17 => DescribeSystemCall(instructionWord),
         18 => DescribeUnconditionalBranch(programCounter, instructionWord),
         19 => DescribeOpcode19(instructionWord),
+        20 => DescribeRotateLeftWordImmediateThenMaskInsert(instructionWord),
         21 => DescribeRotateLeftWordImmediateAndMask(instructionWord),
         24 => DescribeOrImmediate(instructionWord),
         25 => DescribeOrImmediateShifted(instructionWord),
@@ -2210,6 +2349,25 @@ static string DescribeRotateLeftWordImmediateAndMask(uint instructionWord)
     var me = (int)((instructionWord >> 1) & 0x1F);
     var record = (instructionWord & 0x1) != 0 ? "." : string.Empty;
     return $"rlwinm{record} ra=r{ra} rs=r{rs} sh={shift} mb={mb} me={me}";
+}
+
+static string DescribeRotateLeftWordImmediateThenMaskInsert(uint instructionWord)
+{
+    var rs = ExtractRs(instructionWord);
+    var ra = ExtractRa(instructionWord);
+    var shift = (int)((instructionWord >> 11) & 0x1F);
+    var mb = (int)((instructionWord >> 6) & 0x1F);
+    var me = (int)((instructionWord >> 1) & 0x1F);
+    var record = (instructionWord & 0x1) != 0 ? "." : string.Empty;
+    return $"rlwimi{record} ra=r{ra} rs=r{rs} sh={shift} mb={mb} me={me}";
+}
+
+static string DescribeSystemCall(uint instructionWord)
+{
+    var level = (instructionWord >> 5) & 0x7F;
+    return level == 0
+        ? "sc"
+        : $"sc lev={level}";
 }
 
 static string DescribeLoadWord(uint instructionWord)
@@ -2389,6 +2547,8 @@ static string DescribeXForm(uint instructionWord)
         119 => $"lbzux rt=r{rt} ra=r{ra} rb=r{rb}",
         124 => $"nor{record} ra=r{ra} rs=r{rs} rb=r{rb}",
         136 => $"subfe{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        138 => $"adde{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        86 => "dcbf",
         144 => $"mtcrf mask=0x{((instructionWord >> 12) & 0xFF):X2} rs=r{rs}",
         146 => $"mtmsr rs=r{rs}",
         151 => $"stwx rs=r{rs} ra={DescribeBaseRegister(ra)} rb=r{rb}",
@@ -2396,14 +2556,19 @@ static string DescribeXForm(uint instructionWord)
         200 => $"subfze{overflow}{record} rt=r{rt} ra=r{ra}",
         202 => $"addze{overflow}{record} rt=r{rt} ra=r{ra}",
         215 => $"stbx rs=r{rs} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        234 => $"addme{overflow}{record} rt=r{rt} ra=r{ra}",
         235 => $"mullw{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        246 => "dcbtst",
         247 => $"stbux rs=r{rs} ra=r{ra} rb=r{rb}",
         266 => $"add{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        278 => "dcbt",
         279 => $"lhzx rt=r{rt} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        306 => $"tlbie rb=r{rb}",
         311 => $"lhzux rt=r{rt} ra=r{ra} rb=r{rb}",
         316 => $"xor{record} ra=r{ra} rs=r{rs} rb=r{rb}",
         339 => $"mfspr rt=r{rt} spr={DescribeSpr(DecodeSpr(instructionWord))}",
         343 => $"lhax rt=r{rt} ra={DescribeBaseRegister(ra)} rb=r{rb}",
+        370 => "tlbia",
         371 => $"mftb rt=r{rt} spr={DescribeSpr(DecodeSpr(instructionWord))}",
         375 => $"lhaux rt=r{rt} ra=r{ra} rb=r{rb}",
         407 => $"sthx rs=r{rs} ra={DescribeBaseRegister(ra)} rb=r{rb}",
@@ -2411,10 +2576,20 @@ static string DescribeXForm(uint instructionWord)
         444 => $"or{record} ra=r{ra} rs=r{rs} rb=r{rb}",
         459 => $"divwu{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
         467 => $"mtspr spr={DescribeSpr(DecodeSpr(instructionWord))} rs=r{rs}",
+        470 => "dcbi",
         476 => $"nand{record} ra=r{ra} rs=r{rs} rb=r{rb}",
         491 => $"divw{overflow}{record} rt=r{rt} ra=r{ra} rb=r{rb}",
+        536 => $"srw ra=r{ra} rs=r{rs} rb=r{rb}{record}",
+        597 => $"lswi rt=r{rt} ra={DescribeBaseRegister(ra)} nb={DescribeStringWordImmediateByteCount(rb)}",
+        598 => "sync",
+        725 => $"stswi rs=r{rs} ra={DescribeBaseRegister(ra)} nb={DescribeStringWordImmediateByteCount(rb)}",
         824 =>
             $"srawi{record} ra=r{ra} rs=r{rs} sh={(instructionWord >> 11) & 0x1F}",
+        854 => "eieio",
+        922 => $"extsh{record} ra=r{ra} rs=r{rs}",
+        954 => $"extsb{record} ra=r{ra} rs=r{rs}",
+        982 => "icbi",
+        1014 => "dcbz",
         _ => $"op=0x1F xo=0x{xo:X3}",
     };
 }
@@ -2437,6 +2612,15 @@ static int ExtractRa(uint instructionWord)
 static int ExtractRb(uint instructionWord)
 {
     return (int)((instructionWord >> 11) & 0x1F);
+}
+
+static int DescribeStringWordImmediateByteCount(int encodedByteCount)
+{
+    return (encodedByteCount & 0x1F) switch
+    {
+        0 => 32,
+        var byteCount => byteCount,
+    };
 }
 
 static int ExtractSignedImmediate(uint instructionWord)
@@ -3058,6 +3242,19 @@ static ProbeRunReport CreateProbeReport(
             $"0x{entry.PhysicalAddress:X8}",
             $"0x{entry.Value:X8}"))
         .ToArray();
+    var instructionTraceEvents = traceRun.InstructionTraceEvents
+        .Select(entry => new ProbeInstructionTraceEventReport(
+            $"0x{entry.ProgramCounterBefore:X8}",
+            $"0x{entry.ProgramCounterAfter:X8}",
+            $"0x{entry.InstructionWord:X8}",
+            entry.Description,
+            entry.RegisterDeltas
+                .Select(delta => new ProbeRegisterDeltaReport(
+                    delta.RegisterName,
+                    $"0x{delta.BeforeValue:X8}",
+                    $"0x{delta.AfterValue:X8}"))
+                .ToArray()))
+        .ToArray();
     var nullProgramCounterRedirectTrace = nullProgramCounterRedirectEvents
         .TakeLast(64)
         .Select(entry => new ProbeNullProgramCounterRedirectReport(
@@ -3170,6 +3367,7 @@ static ProbeRunReport CreateProbeReport(
         tail,
         watchEvents,
         memoryAccessEvents,
+        instructionTraceEvents,
         supervisorCallsTotal,
         supervisorCallsDelta,
         supervisorCallsites,
@@ -3228,6 +3426,8 @@ sealed record ProbeCliOptions(
     bool TraceWatch32Accesses,
     int TraceWatch32AccessesMaxEvents,
     IReadOnlyList<AddressRange> TraceWatch32ProgramCounterRanges,
+    IReadOnlyList<AddressRange> TraceInstructionProgramCounterRanges,
+    int TraceInstructionMaxEvents,
     IReadOnlyList<uint> TrackedProgramCounters,
     IReadOnlyList<NamedAddress> NamedGlobalAddresses,
     IReadOnlyList<NamedAddress> NamedGlobalEffectiveAddresses,
@@ -3241,7 +3441,28 @@ sealed record TracedRunResult(
     IReadOnlyList<uint> ProgramCounterTail,
     ExecutionStopReason StopReason,
     IReadOnlyList<MemoryWatchTraceEntry> MemoryWatchEvents,
-    IReadOnlyList<PowerPcMemoryAccessTraceEntry> MemoryAccessEvents);
+    IReadOnlyList<PowerPcMemoryAccessTraceEntry> MemoryAccessEvents,
+    IReadOnlyList<PowerPcInstructionTraceEvent> InstructionTraceEvents);
+
+readonly record struct PowerPcTraceSnapshot(
+    uint[] GeneralPurposeRegisters,
+    uint LinkRegister,
+    uint CounterRegister,
+    uint ConditionRegister,
+    uint FixedPointExceptionRegister,
+    uint MachineStateRegister);
+
+readonly record struct PowerPcRegisterDelta(
+    string RegisterName,
+    uint BeforeValue,
+    uint AfterValue);
+
+sealed record PowerPcInstructionTraceEvent(
+    uint ProgramCounterBefore,
+    uint ProgramCounterAfter,
+    uint InstructionWord,
+    string Description,
+    IReadOnlyList<PowerPcRegisterDelta> RegisterDeltas);
 
 sealed record TraceProgress(
     long ExecutedInstructions,
@@ -3287,6 +3508,7 @@ sealed record ProbeRunReport(
     IReadOnlyList<string> ProgramCounterTail,
     IReadOnlyList<ProbeMemoryWatchEventReport> MemoryWatchEvents,
     IReadOnlyList<ProbeMemoryAccessEventReport> MemoryAccessEvents,
+    IReadOnlyList<ProbeInstructionTraceEventReport> InstructionTraceEvents,
     IReadOnlyDictionary<string, long> SupervisorCallsTotal,
     IReadOnlyDictionary<string, long> SupervisorCallsDelta,
     IReadOnlyDictionary<string, long> SupervisorCallsites,
@@ -3314,6 +3536,18 @@ sealed record ProbeMemoryAccessEventReport(
     string EffectiveAddress,
     string PhysicalAddress,
     string Value);
+
+sealed record ProbeRegisterDeltaReport(
+    string Register,
+    string Before,
+    string After);
+
+sealed record ProbeInstructionTraceEventReport(
+    string ProgramCounterBefore,
+    string ProgramCounterAfter,
+    string InstructionWord,
+    string Description,
+    IReadOnlyList<ProbeRegisterDeltaReport> RegisterDeltas);
 
 sealed record ProbeNullProgramCounterRedirectReport(
     string Source,

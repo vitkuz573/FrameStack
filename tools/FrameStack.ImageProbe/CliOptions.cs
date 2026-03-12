@@ -168,6 +168,15 @@ internal static class CliOptions
         "--trace-watch32-pc-range",
         "Access trace program counter range <start>:<end>.");
 
+    internal static readonly Option<string[]> TraceInstructionProgramCounterRanges = CreateManyValueOption(
+        "--trace-insn-pc-range",
+        "Instruction trace program counter range <start>:<end>.");
+
+    internal static readonly Option<int?> TraceInstructionMaxEvents = new("--trace-insn-max")
+    {
+        Description = "Maximum number of instruction trace events to keep.",
+    };
+
     internal static readonly Option<string[]> TrackedProgramCounters = CreateManyValueOption(
         "--count-pc",
         "Track execution hits for program counter.");
