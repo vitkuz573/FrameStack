@@ -17,6 +17,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private const uint IoMemorySizingProbeBytes = 0x0040_0000;
 
     private readonly uint _reportedMemoryBytes;
+    private readonly uint _defaultIoMemoryProfilePercent;
     private uint _manualIoMemoryProfilePercent;
     private bool _hasManualIoMemoryProfile;
 
@@ -25,7 +26,8 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         uint defaultIoMemoryProfilePercent = DefaultIoMemoryProfilePercent)
     {
         _reportedMemoryBytes = reportedMemoryBytes;
-        _manualIoMemoryProfilePercent = NormalizeIoMemoryProfile(defaultIoMemoryProfilePercent);
+        _defaultIoMemoryProfilePercent = NormalizeIoMemoryProfile(defaultIoMemoryProfilePercent);
+        _manualIoMemoryProfilePercent = _defaultIoMemoryProfilePercent;
         _hasManualIoMemoryProfile = false;
     }
 
@@ -58,7 +60,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
             context.ServiceCode == ReadIoMemoryProfileService ||
             context.ServiceCode == CommitIoMemoryProfileService)
         {
-            return new PowerPcSupervisorCallResult(ReturnValue: ResolveIoMemoryProfileResponse());
+            return new PowerPcSupervisorCallResult(ReturnValue: ResolveIoMemoryProfileQueryResponse());
         }
 
         if (context.ServiceCode == SetIoMemoryProfileService ||
@@ -68,14 +70,14 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
             {
                 _manualIoMemoryProfilePercent = NormalizeIoMemoryProfile(context.Argument0);
                 _hasManualIoMemoryProfile = true;
-            }
-            else
-            {
-                // Zero requests keep Smart Init in auto mode.
-                _hasManualIoMemoryProfile = false;
+                return new PowerPcSupervisorCallResult(
+                    ReturnValue: EncodeIoMemoryProfile(_manualIoMemoryProfilePercent));
             }
 
-            return new PowerPcSupervisorCallResult(ReturnValue: ResolveIoMemoryProfileResponse());
+            // Zero requests keep Smart Init in auto mode while preserving Cisco's zero-ack contract.
+            _manualIoMemoryProfilePercent = _defaultIoMemoryProfilePercent;
+            _hasManualIoMemoryProfile = false;
+            return new PowerPcSupervisorCallResult(ReturnValue: 0);
         }
 
         // Most firmware wrappers expect zero on success.
@@ -110,6 +112,15 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         return _hasManualIoMemoryProfile
             ? EncodeIoMemoryProfile(_manualIoMemoryProfilePercent)
             : 0u;
+    }
+
+    private uint ResolveIoMemoryProfileQueryResponse()
+    {
+        var activePercent = _hasManualIoMemoryProfile
+            ? _manualIoMemoryProfilePercent
+            : _defaultIoMemoryProfilePercent;
+
+        return EncodeIoMemoryProfile(activePercent);
     }
 
     private static uint EncodeIoMemoryProfile(uint ioMemoryProfilePercent)

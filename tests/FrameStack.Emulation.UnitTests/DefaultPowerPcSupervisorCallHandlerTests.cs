@@ -147,7 +147,59 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 0));
 
         Assert.Equal(0u, setResult.ReturnValue);
-        Assert.Equal(0u, readResult.ReturnValue);
+        Assert.Equal(120u, readResult.ReturnValue);
+    }
+
+    [Theory]
+    [InlineData(0x3A)]
+    [InlineData(0x3C)]
+    [InlineData(0x3E)]
+    public void HandleShouldReturnDefaultIoMemoryProfileForQueryServicesInAutoMode(uint serviceCode)
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler();
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: serviceCode,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        Assert.Equal(120u, result.ReturnValue);
+    }
+
+    [Fact]
+    public void HandleShouldResetIoMemoryProfileToDefaultAfterZeroSetRequest()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler();
+
+        _ = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3B,
+            Argument0: 0x0000_0067,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        var resetResult = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3B,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        var readResult = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3C,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0));
+
+        Assert.Equal(0u, resetResult.ReturnValue);
+        Assert.Equal(120u, readResult.ReturnValue);
     }
 
     [Fact]

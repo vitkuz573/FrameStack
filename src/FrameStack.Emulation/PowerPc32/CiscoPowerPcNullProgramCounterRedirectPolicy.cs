@@ -12,6 +12,7 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
     private const int FallbackCandidateScore = 420;
     private const int Register30CandidateScore = 300;
     private const int Register31CandidateScore = 280;
+    private const int StaleBackChainPenaltyScore = 192;
     private const uint CandidateCodeAddressFloor = 0x8000_0000;
     private const uint CandidateCodeAddressCeilingExclusive = 0x8200_0000;
     private const uint StackPointerCandidateWindow = 0x0000_4000;
@@ -35,6 +36,12 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         -0x20,
         -0x24,
         -0x28,
+        -0x2C,
+        -0x30,
+        -0x34,
+        -0x38,
+        -0x3C,
+        -0x40,
         0x24,
         0x28,
         0x2C,
@@ -135,6 +142,7 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
 
         RedirectCandidate? bestCandidate = null;
         RedirectCandidate? bestSuppressedCandidate = null;
+        RedirectCandidate? bestSuppressedFallbackCandidate = null;
 
         foreach (var candidate in candidates)
         {
@@ -143,8 +151,14 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
 
             if (isSuppressed)
             {
-                if (candidate.Resolution.Source != PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint &&
-                    IsBetterCandidate(candidate, bestSuppressedCandidate))
+                if (candidate.Resolution.Source == PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint)
+                {
+                    if (IsBetterCandidate(candidate, bestSuppressedFallbackCandidate))
+                    {
+                        bestSuppressedFallbackCandidate = candidate;
+                    }
+                }
+                else if (IsBetterCandidate(candidate, bestSuppressedCandidate))
                 {
                     bestSuppressedCandidate = candidate;
                 }
@@ -168,6 +182,13 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         if (bestSuppressedCandidate.HasValue)
         {
             resolution = bestSuppressedCandidate.Value.Resolution;
+            RememberResolution(registers, resolution, hasStackSignal);
+            return true;
+        }
+
+        if (bestSuppressedFallbackCandidate.HasValue)
+        {
+            resolution = bestSuppressedFallbackCandidate.Value.Resolution;
             RememberResolution(registers, resolution, hasStackSignal);
             return true;
         }
@@ -252,16 +273,17 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
                 continue;
             }
 
-            if (LooksLikeStaleBackChainReturnSlot(
-                    stackPointer,
-                    address,
-                    readDataWord,
-                    readInstructionWord))
-            {
-                continue;
-            }
-
-            var score = ComputeStackSlotScore(stackPointer, address, offset, readDataWord);
+            var looksLikeStaleBackChain = LooksLikeStaleBackChainReturnSlot(
+                stackPointer,
+                address,
+                readDataWord,
+                readInstructionWord);
+            var score = ComputeStackSlotScore(
+                stackPointer,
+                address,
+                offset,
+                readDataWord,
+                looksLikeStaleBackChain);
             TryAddCandidate(
                 candidates,
                 candidate,
@@ -326,7 +348,8 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         uint stackPointer,
         uint stackSlotAddress,
         int stackSlotOffset,
-        Func<uint, uint> readDataWord)
+        Func<uint, uint> readDataWord,
+        bool looksLikeStaleBackChain)
     {
         var score = StackSlotCandidateScore;
         var distancePenalty = Math.Min(96, Math.Abs(stackSlotOffset) * 2);
@@ -354,6 +377,11 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
             score += stackSlotAddress >= stackPointer
                 ? 36
                 : -12;
+        }
+
+        if (looksLikeStaleBackChain)
+        {
+            score -= StaleBackChainPenaltyScore;
         }
 
         return score;

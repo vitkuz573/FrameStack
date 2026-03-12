@@ -222,6 +222,67 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
     }
 
     [Fact]
+    public void TryResolveRedirectTargetShouldUseBackChainSlotWhenItIsOnlyAlternativeToFallback()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+
+        var resolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address switch
+            {
+                0x0FE8 => 0x1000u,      // frame back-chain signal
+                0x0FEC => 0x8000_8084u, // continuation candidate below SP
+                _ => 0u
+            },
+            address => address switch
+            {
+                0x8000_8084 or 0x8000_8088 => 0x4E80_0020u,
+                0x8000_8000 or 0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var resolution);
+
+        Assert.True(resolved);
+        Assert.Equal(0x8000_8084u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.StackSlot, resolution.Source);
+        Assert.Equal(0x0FECu, resolution.StackAddress);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldConsiderDeepStackSlotWhenNearSlotLooksStale()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+
+        var resolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address switch
+            {
+                0x0FE8 => 0x1000u,      // back-chain for stale near return slot (SP-0x14)
+                0x0FEC => 0x8000_8084u, // stale near return slot
+                0x0FC8 => 0x9000_0000u, // keep deep slot from being treated as frame-chain stale
+                0x0FCC => 0x8003_1020u, // deeper return slot at SP-0x34
+                _ => 0u
+            },
+            address => address switch
+            {
+                0x8000_8084 or 0x8000_8088 => 0x4E80_0020u,
+                0x8003_1020 or 0x8003_1024 => 0x4E80_0020u,
+                0x8000_8000 or 0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var resolution);
+
+        Assert.True(resolved);
+        Assert.Equal(0x8003_1020u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.StackSlot, resolution.Source);
+        Assert.Equal(0x0FCCu, resolution.StackAddress);
+    }
+
+    [Fact]
     public void TryResolveRedirectTargetShouldAvoidImmediateRepeatAndUseAlternativeCandidate()
     {
         var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
@@ -310,5 +371,33 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
         Assert.True(resolved);
         Assert.Equal(0x8000_8000u, resolution.RedirectTarget);
         Assert.Equal(PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint, resolution.Source);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldAllowSuppressedFallbackAsLastResort()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+
+        var firstResolved = policy.TryResolveRedirectTarget(
+            registers,
+            _ => 0u,
+            address => address == 0x8000_8000 || address == 0x8000_8004 ? 0x4E80_0020u : 0u,
+            out var firstResolution);
+
+        Assert.True(firstResolved);
+        Assert.Equal(0x8000_8000u, firstResolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint, firstResolution.Source);
+
+        var secondResolved = policy.TryResolveRedirectTarget(
+            registers,
+            _ => 0u,
+            address => address == 0x8000_8000 || address == 0x8000_8004 ? 0x4E80_0020u : 0u,
+            out var secondResolution);
+
+        Assert.True(secondResolved);
+        Assert.Equal(0x8000_8000u, secondResolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint, secondResolution.Source);
     }
 }
