@@ -121,6 +121,10 @@ internal static class CliOptions
         "--stop-on-svc",
         "Stop when specified supervisor service is called.");
 
+    internal static readonly Option<string[]> StopOnSupervisorSignatures = CreateManyValueOption(
+        "--stop-on-svc-signature",
+        "Stop on supervisor signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>.");
+
     internal static readonly Option<int?> TailLength = new("--tail-length")
     {
         Description = "Program counter tail length in report.",

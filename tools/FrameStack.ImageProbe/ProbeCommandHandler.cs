@@ -95,6 +95,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.StopAtProgramCounter);
         command.Options.Add(CliOptions.StopAtProgramCounterHits);
         command.Options.Add(CliOptions.StopOnSupervisorService);
+        command.Options.Add(CliOptions.StopOnSupervisorSignatures);
         command.Options.Add(CliOptions.TailLength);
         command.Options.Add(CliOptions.AdditionalInstructionWindows);
         command.Options.Add(CliOptions.WatchWordAddresses);
@@ -173,6 +174,13 @@ internal static class ProbeCommandHandler
             parseResult.GetValue(CliOptions.StopAtProgramCounter));
         var stopOnSupervisorService = ParseOptionalUInt32(
             parseResult.GetValue(CliOptions.StopOnSupervisorService));
+        var stopOnSupervisorSignatures = new HashSet<SupervisorCallSignatureKey>();
+        foreach (var token in parseResult.GetValue(CliOptions.StopOnSupervisorSignatures) ?? [])
+        {
+            AddDistinct(
+                stopOnSupervisorSignatures,
+                ParseSupervisorCallSignatureKey("--stop-on-svc-signature", token));
+        }
 
         var stopAtProgramCounterHits = new Dictionary<uint, long>();
         foreach (var token in parseResult.GetValue(CliOptions.StopAtProgramCounterHits) ?? [])
@@ -340,6 +348,7 @@ internal static class ProbeCommandHandler
             stopAtProgramCounter,
             stopAtProgramCounterHits,
             stopOnSupervisorService,
+            stopOnSupervisorSignatures,
             tailLength,
             supervisorReturnOverrides,
             supervisorReturnCallerOverrides,
@@ -614,22 +623,28 @@ internal static class ProbeCommandHandler
 
         var signatureToken = token[..equalsSeparator];
         var returnValue = ParseUInt32Flexible(token[(equalsSeparator + 1)..]);
-        var atSeparator = signatureToken.IndexOf('@');
+        var signature = ParseSupervisorCallSignatureKey("--svc-return-signature", signatureToken);
+        return (signature, returnValue);
+    }
 
-        if (atSeparator <= 0 || atSeparator == signatureToken.Length - 1)
+    private static SupervisorCallSignatureKey ParseSupervisorCallSignatureKey(string optionName, string token)
+    {
+        var atSeparator = token.IndexOf('@');
+
+        if (atSeparator <= 0 || atSeparator == token.Length - 1)
         {
             throw new ArgumentException(
-                $"Invalid supervisor signature override '{token}'. Expected format '<service>@<caller>/<a0>/<a1>/<a2>/<a3>=<value>'.");
+                $"Invalid '{optionName}' value '{token}'. Expected format '<service>@<caller>/<a0>/<a1>/<a2>/<a3>'.");
         }
 
-        var serviceCode = ParseUInt32Flexible(signatureToken[..atSeparator]);
-        var signatureTail = signatureToken[(atSeparator + 1)..];
+        var serviceCode = ParseUInt32Flexible(token[..atSeparator]);
+        var signatureTail = token[(atSeparator + 1)..];
         var slashParts = signatureTail.Split('/', StringSplitOptions.TrimEntries);
 
         if (slashParts.Length != 5)
         {
             throw new ArgumentException(
-                $"Invalid supervisor signature override '{token}'. Expected format '<service>@<caller>/<a0>/<a1>/<a2>/<a3>=<value>'.");
+                $"Invalid '{optionName}' value '{token}'. Expected format '<service>@<caller>/<a0>/<a1>/<a2>/<a3>'.");
         }
 
         var callerProgramCounter = ParseUInt32Flexible(slashParts[0]);
@@ -637,15 +652,14 @@ internal static class ProbeCommandHandler
         var argument1 = ParseUInt32Flexible(slashParts[2]);
         var argument2 = ParseUInt32Flexible(slashParts[3]);
         var argument3 = ParseUInt32Flexible(slashParts[4]);
-        return (
-            new SupervisorCallSignatureKey(
-                serviceCode,
-                callerProgramCounter,
-                argument0,
-                argument1,
-                argument2,
-                argument3),
-            returnValue);
+
+        return new SupervisorCallSignatureKey(
+            serviceCode,
+            callerProgramCounter,
+            argument0,
+            argument1,
+            argument2,
+            argument3);
     }
 
     private static (uint ProgramCounter, long RequiredHits) ParseProgramCounterHitStop(string optionName, string token)

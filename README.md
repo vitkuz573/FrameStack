@@ -63,6 +63,7 @@ Arguments:
   - `--stop-at-pc 0x...`
   - `--stop-at-pc-hit 0x...=<hit-count>`
   - `--stop-on-svc 0x...`
+  - `--stop-on-svc-signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>`
   - `--stop-on-watch32-change 0x...`
   - `--stop-on-watch32-change-reg rN:<offset>`
   - `--stop-on-console-repeat "<text>=<count>"`
