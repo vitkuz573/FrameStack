@@ -86,6 +86,36 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void ExecuteCycleShouldCaptureNullProgramCounterRedirectEvent()
+    {
+        var cpu = new PowerPc32CpuCore(
+            new DefaultPowerPcSupervisorCallHandler(),
+            new StaticNullProgramCounterRedirectPolicy(
+                0x1200,
+                PowerPcNullProgramCounterRedirectSource.StackSlot,
+                stackAddress: 0x07FF_F004));
+        var memory = new ArrayMemoryBus(baseAddress: 0, sizeBytes: 0x3000);
+        memory.WriteUInt32(0x1200, 0x6000_0000); // nop
+
+        cpu.Reset(0);
+        cpu.Registers[1] = 0x07FF_F000;
+        cpu.Registers.Lr = 0x8000_6000;
+        cpu.Registers[30] = 0x8000_3000;
+        cpu.Registers[31] = 0x8000_4000;
+
+        cpu.ExecuteCycle(memory);
+
+        var redirectEvent = Assert.Single(cpu.NullProgramCounterRedirectEvents);
+        Assert.Equal(0x1200u, redirectEvent.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.StackSlot, redirectEvent.Source);
+        Assert.Equal(0x07FF_F004u, redirectEvent.StackAddress);
+        Assert.Equal(0x07FF_F000u, redirectEvent.StackPointer);
+        Assert.Equal(0x8000_6000u, redirectEvent.LinkRegister);
+        Assert.Equal(0x8000_3000u, redirectEvent.Register30);
+        Assert.Equal(0x8000_4000u, redirectEvent.Register31);
+    }
+
+    [Fact]
     public void ExecuteCycleShouldThrowForNullProgramCounterWhenPolicyIsNotConfigured()
     {
         var cpu = new PowerPc32CpuCore();
@@ -229,6 +259,42 @@ public sealed class PowerPc32CpuCoreTests
 
         Assert.Equal(0u, cpu.Registers[5]);
         Assert.Equal(0x2000_0000u, cpu.Registers.Xer & 0x2000_0000u);
+    }
+
+    [Fact]
+    public void AddcShouldSetCarryFlagOnUnsignedOverflow()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7D4A_6014); // addc r10, r10, r12
+
+        cpu.Reset(0x1000);
+        cpu.Registers[10] = 0xFFFF_FFFF;
+        cpu.Registers[12] = 2;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(1u, cpu.Registers[10]);
+        Assert.Equal(0x2000_0000u, cpu.Registers.Xer & 0x2000_0000u);
+    }
+
+    [Fact]
+    public void AddcDotShouldUpdateCr0FromResult()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7D4A_6015); // addc. r10, r10, r12
+
+        cpu.Reset(0x1000);
+        cpu.Registers[10] = 1;
+        cpu.Registers[12] = 1;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(2u, cpu.Registers[10]);
+        Assert.Equal(0b0100u, (cpu.Registers.Cr >> 28) & 0xFu);
     }
 
     [Fact]
@@ -1196,16 +1262,23 @@ public sealed class PowerPc32CpuCoreTests
         }
     }
 
-    private sealed class StaticNullProgramCounterRedirectPolicy(uint redirectTarget)
+    private sealed class StaticNullProgramCounterRedirectPolicy(
+        uint redirectTarget,
+        PowerPcNullProgramCounterRedirectSource source = PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint,
+        uint? stackAddress = null)
         : IPowerPcNullProgramCounterRedirectPolicy
     {
         public bool TryResolveRedirectTarget(
             PowerPc32RegisterFile registers,
             Func<uint, uint> readDataWord,
             Func<uint, uint> readInstructionWord,
-            out uint resolvedTarget)
+            out PowerPcNullProgramCounterRedirectResolution resolution)
         {
-            resolvedTarget = redirectTarget;
+            resolution = new PowerPcNullProgramCounterRedirectResolution(
+                RedirectTarget: redirectTarget,
+                Source: source,
+                CandidateValue: redirectTarget,
+                StackAddress: stackAddress);
             return true;
         }
     }

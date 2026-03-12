@@ -35,12 +35,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const uint XerCaMask = 0x2000_0000;
     private const uint MachineStateDataRelocationMask = 0x0000_0010;
     private const uint MachineStateInstructionRelocationMask = 0x0000_0020;
+    private const int MaxNullProgramCounterRedirectEvents = 64;
 
     private readonly PowerPc32RegisterFile _registers = new();
     private readonly Dictionary<int, uint> _extendedSpr = new();
     private readonly Mpc8xxTlbEntry?[] _instructionTlb = new Mpc8xxTlbEntry?[32];
     private readonly Mpc8xxTlbEntry?[] _dataTlb = new Mpc8xxTlbEntry?[32];
     private readonly Dictionary<uint, long> _supervisorCallCounters = new();
+    private readonly List<PowerPcNullProgramCounterRedirectEvent> _nullProgramCounterRedirectEvents = [];
     private readonly IPowerPcNullProgramCounterRedirectPolicy? _nullProgramCounterRedirectPolicy;
     private uint _machineStateRegister;
     private ulong _timeBaseCounter;
@@ -76,6 +78,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
     public IReadOnlyDictionary<uint, long> SupervisorCallCounters => _supervisorCallCounters;
 
     public long NullProgramCounterRedirectCount => _nullProgramCounterRedirectCount;
+
+    public IReadOnlyList<PowerPcNullProgramCounterRedirectEvent> NullProgramCounterRedirectEvents
+        => _nullProgramCounterRedirectEvents;
 
     public bool NullProgramCounterRedirectEnabled { get; set; } = true;
 
@@ -603,15 +608,62 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers,
                 effectiveAddress => ReadDataUInt32(memoryBus, effectiveAddress),
                 effectiveAddress => memoryBus.ReadUInt32(TranslateInstructionAddress(effectiveAddress)),
-                out var redirectTarget) ||
-            redirectTarget == 0)
+                out var resolution) ||
+            resolution.RedirectTarget == 0)
         {
             return false;
         }
 
-        _registers.Pc = redirectTarget;
+        RecordNullProgramCounterRedirectEvent(memoryBus, resolution);
+        _registers.Pc = resolution.RedirectTarget;
         _nullProgramCounterRedirectCount++;
         return true;
+    }
+
+    private void RecordNullProgramCounterRedirectEvent(
+        IMemoryBus memoryBus,
+        PowerPcNullProgramCounterRedirectResolution resolution)
+    {
+        if (_nullProgramCounterRedirectEvents.Count >= MaxNullProgramCounterRedirectEvents)
+        {
+            _nullProgramCounterRedirectEvents.RemoveAt(0);
+        }
+
+        var stackPointer = _registers[1];
+        var stackWordMinus24 = TryReadDataWordForRedirectTrace(memoryBus, unchecked(stackPointer - 0x18));
+        var stackWordMinus20 = TryReadDataWordForRedirectTrace(memoryBus, unchecked(stackPointer - 0x14));
+        var stackWordMinus16 = TryReadDataWordForRedirectTrace(memoryBus, unchecked(stackPointer - 0x10));
+        var stackWordAtPointer = TryReadDataWordForRedirectTrace(memoryBus, stackPointer);
+        var stackWordPlus4 = TryReadDataWordForRedirectTrace(memoryBus, unchecked(stackPointer + 0x04));
+        var stackWordPlus8 = TryReadDataWordForRedirectTrace(memoryBus, unchecked(stackPointer + 0x08));
+
+        _nullProgramCounterRedirectEvents.Add(new PowerPcNullProgramCounterRedirectEvent(
+            RedirectTarget: resolution.RedirectTarget,
+            Source: resolution.Source,
+            CandidateValue: resolution.CandidateValue,
+            StackAddress: resolution.StackAddress,
+            StackPointer: stackPointer,
+            LinkRegister: _registers.Lr,
+            Register30: _registers[30],
+            Register31: _registers[31],
+            StackWordMinus24: stackWordMinus24,
+            StackWordMinus20: stackWordMinus20,
+            StackWordMinus16: stackWordMinus16,
+            StackWordAtPointer: stackWordAtPointer,
+            StackWordPlus4: stackWordPlus4,
+            StackWordPlus8: stackWordPlus8));
+    }
+
+    private uint TryReadDataWordForRedirectTrace(IMemoryBus memoryBus, uint effectiveAddress)
+    {
+        try
+        {
+            return ReadDataUInt32(memoryBus, effectiveAddress);
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private uint ComputeEffectiveAddress(PowerPcInstruction instruction)
@@ -818,6 +870,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
                     unchecked((int)_registers[instruction.Ra]),
                     unchecked((int)_registers[instruction.Rb]));
                 _registers.Pc += 4;
+                break;
+            case 10: // addc
+                ExecuteAddCarrying(instruction);
                 break;
             case 8: // subfc
                 ExecuteSubtractFrom(instruction, withCarry: true, useExtendedCarry: false);
@@ -1047,6 +1102,24 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         var result = unchecked(_registers[instruction.Ra] + _registers[instruction.Rb]);
         _registers[instruction.Rt] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteAddCarrying(PowerPcInstruction instruction)
+    {
+        var left = _registers[instruction.Ra];
+        var right = _registers[instruction.Rb];
+        var sum = (ulong)left + right;
+        var result = unchecked((uint)sum);
+
+        _registers[instruction.Rt] = result;
+        SetCarryFlag((sum >> 32) != 0);
 
         if (instruction.RecordCondition)
         {

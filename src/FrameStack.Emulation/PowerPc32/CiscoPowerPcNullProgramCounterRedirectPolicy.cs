@@ -4,6 +4,7 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
     : IPowerPcNullProgramCounterRedirectPolicy
 {
     private const uint CandidateCodeAddressFloor = 0x8000_0000;
+    private const uint CandidateCodeAddressCeilingExclusive = 0x8200_0000;
     private const uint StackPointerCandidateWindow = 0x0000_4000;
     private static readonly int[] StackProbeOffsets =
     [
@@ -23,8 +24,19 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         0x2C,
         0x30
     ];
+    private static readonly int[] StackFrameReturnProbeOffsets =
+    [
+        0x04,
+        0x08,
+        0x0C,
+        0x10,
+        0x14,
+        0x18,
+        0x1C
+    ];
 
     private readonly uint _fallbackEntryPoint;
+    private uint _lastResolvedNonFallbackTarget;
 
     public CiscoPowerPcNullProgramCounterRedirectPolicy(uint fallbackEntryPoint)
     {
@@ -35,34 +47,96 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         PowerPc32RegisterFile registers,
         Func<uint, uint> readDataWord,
         Func<uint, uint> readInstructionWord,
-        out uint redirectTarget)
+        out PowerPcNullProgramCounterRedirectResolution resolution)
     {
-        if (TryUseCandidate(registers.Lr, readInstructionWord, out redirectTarget))
+        if (TryUseCandidate(
+                registers.Lr,
+                readInstructionWord,
+                PowerPcNullProgramCounterRedirectSource.LinkRegister,
+                stackAddress: null,
+                out resolution))
+        {
+            RememberResolution(resolution);
+            return true;
+        }
+
+        if (TryResolveStackCandidate(registers, readDataWord, readInstructionWord, out resolution))
+        {
+            RememberResolution(resolution);
+            return true;
+        }
+
+        if (_lastResolvedNonFallbackTarget != 0 &&
+            HasStackSignal(registers[1], readDataWord) &&
+            TryUseCandidate(
+                _lastResolvedNonFallbackTarget,
+                readInstructionWord,
+                PowerPcNullProgramCounterRedirectSource.LastKnownTarget,
+                stackAddress: null,
+                out resolution))
         {
             return true;
         }
 
-        if (TryResolveStackCandidate(registers, readDataWord, readInstructionWord, out redirectTarget))
+        if (TryUseCandidate(
+                _fallbackEntryPoint,
+                readInstructionWord,
+                PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint,
+                stackAddress: null,
+                out resolution))
         {
             return true;
         }
 
-        if (TryUseCandidate(_fallbackEntryPoint, readInstructionWord, out redirectTarget))
+        if (TryUseCandidate(
+                registers[30],
+                readInstructionWord,
+                PowerPcNullProgramCounterRedirectSource.Register30,
+                stackAddress: null,
+                out resolution))
         {
             return true;
         }
 
-        if (TryUseCandidate(registers[30], readInstructionWord, out redirectTarget))
+        if (TryUseCandidate(
+                registers[31],
+                readInstructionWord,
+                PowerPcNullProgramCounterRedirectSource.Register31,
+                stackAddress: null,
+                out resolution))
         {
             return true;
         }
 
-        if (TryUseCandidate(registers[31], readInstructionWord, out redirectTarget))
+        resolution = default;
+        return false;
+    }
+
+    private void RememberResolution(PowerPcNullProgramCounterRedirectResolution resolution)
+    {
+        _lastResolvedNonFallbackTarget = resolution.RedirectTarget;
+    }
+
+    private static bool HasStackSignal(uint stackPointer, Func<uint, uint> readDataWord)
+    {
+        var probeAddresses = new uint[]
         {
-            return true;
+            unchecked(stackPointer - 0x18),
+            unchecked(stackPointer - 0x14),
+            unchecked(stackPointer - 0x10),
+            stackPointer,
+            unchecked(stackPointer + 0x04),
+            unchecked(stackPointer + 0x08)
+        };
+
+        foreach (var address in probeAddresses)
+        {
+            if (readDataWord(address) != 0)
+            {
+                return true;
+            }
         }
 
-        redirectTarget = 0;
         return false;
     }
 
@@ -70,7 +144,7 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         PowerPc32RegisterFile registers,
         Func<uint, uint> readDataWord,
         Func<uint, uint> readInstructionWord,
-        out uint redirectTarget)
+        out PowerPcNullProgramCounterRedirectResolution resolution)
     {
         var stackPointer = registers[1];
 
@@ -81,32 +155,123 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
 
             if (IsNearStackPointer(candidate, stackPointer))
             {
+                if (TryResolveStackFrameChainCandidate(
+                        stackPointer,
+                        address,
+                        candidate,
+                        readDataWord,
+                        readInstructionWord,
+                        out resolution))
+                {
+                    return true;
+                }
+
                 continue;
             }
 
-            if (TryUseCandidate(candidate, readInstructionWord, out redirectTarget))
+            if (TryUseCandidate(
+                    candidate,
+                    readInstructionWord,
+                    PowerPcNullProgramCounterRedirectSource.StackSlot,
+                    address,
+                    out resolution))
             {
                 return true;
             }
         }
 
-        redirectTarget = 0;
+        resolution = default;
+        return false;
+    }
+
+    private static bool TryResolveStackFrameChainCandidate(
+        uint stackPointer,
+        uint stackSlotAddress,
+        uint framePointerCandidate,
+        Func<uint, uint> readDataWord,
+        Func<uint, uint> readInstructionWord,
+        out PowerPcNullProgramCounterRedirectResolution resolution)
+    {
+        if ((framePointerCandidate & 0x3) != 0)
+        {
+            resolution = default;
+            return false;
+        }
+
+        foreach (var probeOffset in StackFrameReturnProbeOffsets)
+        {
+            var returnSlotAddress = unchecked(stackSlotAddress + (uint)probeOffset);
+            var returnAddressCandidate = readDataWord(returnSlotAddress);
+
+            if (IsNearStackPointer(returnAddressCandidate, stackPointer))
+            {
+                continue;
+            }
+
+            if (TryUseCandidate(
+                    returnAddressCandidate,
+                    readInstructionWord,
+                    PowerPcNullProgramCounterRedirectSource.StackFrameChain,
+                    returnSlotAddress,
+                    out resolution))
+            {
+                return true;
+            }
+        }
+
+        foreach (var probeOffset in StackFrameReturnProbeOffsets)
+        {
+            var returnSlotAddress = unchecked(framePointerCandidate + (uint)probeOffset);
+            var returnAddressCandidate = readDataWord(returnSlotAddress);
+
+            if (IsNearStackPointer(returnAddressCandidate, stackPointer))
+            {
+                continue;
+            }
+
+            if (TryUseCandidate(
+                    returnAddressCandidate,
+                    readInstructionWord,
+                    PowerPcNullProgramCounterRedirectSource.StackFrameChain,
+                    returnSlotAddress,
+                    out resolution))
+            {
+                return true;
+            }
+        }
+
+        resolution = default;
         return false;
     }
 
     private static bool TryUseCandidate(
         uint candidate,
         Func<uint, uint> readInstructionWord,
-        out uint redirectTarget)
+        PowerPcNullProgramCounterRedirectSource source,
+        uint? stackAddress,
+        out PowerPcNullProgramCounterRedirectResolution resolution)
     {
-        redirectTarget = NormalizeCandidate(candidate);
+        var redirectTarget = NormalizeCandidate(candidate);
 
-        if (redirectTarget < CandidateCodeAddressFloor)
+        if (redirectTarget < CandidateCodeAddressFloor ||
+            redirectTarget >= CandidateCodeAddressCeilingExclusive)
         {
+            resolution = default;
             return false;
         }
 
-        return LooksLikeExecutableAddress(redirectTarget, readInstructionWord);
+        if (!LooksLikeExecutableAddress(redirectTarget, readInstructionWord))
+        {
+            resolution = default;
+            return false;
+        }
+
+        resolution = new PowerPcNullProgramCounterRedirectResolution(
+            RedirectTarget: redirectTarget,
+            Source: source,
+            CandidateValue: candidate,
+            StackAddress: stackAddress);
+        return true;
     }
 
     private static bool IsNearStackPointer(uint candidate, uint stackPointer)
@@ -122,8 +287,20 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicy
         uint address,
         Func<uint, uint> readInstructionWord)
     {
-        var instructionWord = readInstructionWord(address);
+        var firstInstruction = readInstructionWord(address);
+        var secondInstruction = readInstructionWord(unchecked(address + 4));
 
+        if (!LooksLikeInstructionWord(firstInstruction) ||
+            !LooksLikeInstructionWord(secondInstruction))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool LooksLikeInstructionWord(uint instructionWord)
+    {
         if (instructionWord == 0)
         {
             return false;

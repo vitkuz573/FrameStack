@@ -15,11 +15,13 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
         var resolved = policy.TryResolveRedirectTarget(
             registers,
             _ => 0,
-            address => address == 0x8000_1000 ? 0x3860_0001u : 0x0000_0000u,
-            out var target);
+            address => address == 0x8000_1000 || address == 0x8000_1004 ? 0x3860_0001u : 0x0000_0000u,
+            out var resolution);
 
         Assert.True(resolved);
-        Assert.Equal(0x8000_1000u, target);
+        Assert.Equal(0x8000_1000u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.LinkRegister, resolution.Source);
+        Assert.Null(resolution.StackAddress);
     }
 
     [Fact]
@@ -32,11 +34,37 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
         var resolved = policy.TryResolveRedirectTarget(
             registers,
             address => address == 0x1004 ? 0x8000_2000u : 0u,
-            address => address == 0x8000_2000 ? 0x4E80_0020u : 0x0000_0000u,
-            out var target);
+            address => address == 0x8000_2000 || address == 0x8000_2004 ? 0x4E80_0020u : 0x0000_0000u,
+            out var resolution);
 
         Assert.True(resolved);
-        Assert.Equal(0x8000_2000u, target);
+        Assert.Equal(0x8000_2000u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.StackSlot, resolution.Source);
+        Assert.Equal(0x1004u, resolution.StackAddress);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldUseStackFrameChainReturnCandidateWhenExecutable()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+
+        var resolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address switch
+            {
+                0x1004 => 0x1000u, // frame-pointer-like value close to SP
+                0x1008 => 0x8000_2600u,
+                _ => 0u
+            },
+            address => address == 0x8000_2600 || address == 0x8000_2604 ? 0x4E80_0020u : 0x0000_0000u,
+            out var resolution);
+
+        Assert.True(resolved);
+        Assert.Equal(0x8000_2600u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.StackFrameChain, resolution.Source);
+        Assert.Equal(0x1008u, resolution.StackAddress);
     }
 
     [Fact]
@@ -52,10 +80,41 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
             registers,
             _ => 0u,
             _ => 0x4E80_0020u,
-            out var target);
+            out var resolution);
 
         Assert.True(resolved);
-        Assert.Equal(0x8000_8000u, target);
+        Assert.Equal(0x8000_8000u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint, resolution.Source);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldPreferLastKnownTargetBeforeFallback()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers.Lr = 0x8000_1110;
+
+        var firstResolved = policy.TryResolveRedirectTarget(
+            registers,
+            _ => 0u,
+            address => address == 0x8000_1110 || address == 0x8000_1114 ? 0x4E80_0020u : 0u,
+            out var firstResolution);
+
+        Assert.True(firstResolved);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.LinkRegister, firstResolution.Source);
+        Assert.Equal(0x8000_1110u, firstResolution.RedirectTarget);
+
+        registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+        var secondResolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address == 0x1000 ? 1u : 0u,
+            _ => 0x4E80_0020u,
+            out var secondResolution);
+
+        Assert.True(secondResolved);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.LastKnownTarget, secondResolution.Source);
+        Assert.Equal(0x8000_1110u, secondResolution.RedirectTarget);
     }
 
     [Fact]
@@ -68,10 +127,36 @@ public sealed class CiscoPowerPcNullProgramCounterRedirectPolicyTests
         var resolved = policy.TryResolveRedirectTarget(
             registers,
             address => address == 0x1004 ? 0x8000_2000u : 0u,
-            address => address == 0x8000_8000 ? 0x4E80_0020u : 0x0000_0000u,
-            out var target);
+            address => address == 0x8000_8000 || address == 0x8000_8004 ? 0x4E80_0020u : 0x0000_0000u,
+            out var resolution);
 
         Assert.True(resolved);
-        Assert.Equal(0x8000_8000u, target);
+        Assert.Equal(0x8000_8000u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint, resolution.Source);
+    }
+
+    [Fact]
+    public void TryResolveRedirectTargetShouldRejectHighDataRangeCandidateEvenIfOpcodesLookValid()
+    {
+        var policy = new CiscoPowerPcNullProgramCounterRedirectPolicy(0x8000_8000);
+        var registers = new PowerPc32RegisterFile();
+        registers[1] = 0x1000;
+
+        var resolved = policy.TryResolveRedirectTarget(
+            registers,
+            address => address == 0x1004 ? 0x8263_35DCu : 0u,
+            address => address switch
+            {
+                0x8263_35DC => 0x8263_3604u, // opcode-looking data words
+                0x8263_35E0 => 0x8263_35F0u,
+                0x8000_8000 => 0x4E80_0020u,
+                0x8000_8004 => 0x4E80_0020u,
+                _ => 0u
+            },
+            out var resolution);
+
+        Assert.True(resolved);
+        Assert.Equal(0x8000_8000u, resolution.RedirectTarget);
+        Assert.Equal(PowerPcNullProgramCounterRedirectSource.FallbackEntryPoint, resolution.Source);
     }
 }

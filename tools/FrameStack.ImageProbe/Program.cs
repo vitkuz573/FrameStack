@@ -329,6 +329,7 @@ try
     }
 
     var supervisorCallCountersBaseline = SnapshotSupervisorCallCounters(powerPcCore);
+    var nullProgramCounterRedirectCountBaseline = powerPcCore?.NullProgramCounterRedirectCount ?? 0;
     var timelineExecuted = 0L;
 
     if (timelineSteps > 0)
@@ -415,7 +416,19 @@ try
     var runInstructionsPerSecond = runStopwatch.Elapsed.TotalSeconds > 0
         ? executedThisRun / runStopwatch.Elapsed.TotalSeconds
         : 0;
-    var nullProgramCounterRedirectCount = powerPcCore?.NullProgramCounterRedirectCount ?? 0;
+    var nullProgramCounterRedirectCountTotal = powerPcCore?.NullProgramCounterRedirectCount ?? 0;
+    var nullProgramCounterRedirectCount = Math.Max(
+        0,
+        nullProgramCounterRedirectCountTotal - nullProgramCounterRedirectCountBaseline);
+    var nullProgramCounterRedirectEvents = powerPcCore?.NullProgramCounterRedirectEvents.ToArray()
+                                             ?? Array.Empty<PowerPcNullProgramCounterRedirectEvent>();
+    var nullProgramCounterRedirectSourceCounts = nullProgramCounterRedirectEvents
+        .GroupBy(entry => entry.Source)
+        .OrderByDescending(group => group.Count())
+        .ThenBy(group => group.Key)
+        .ToDictionary(
+            group => group.Key,
+            group => (long)group.LongCount());
     var supervisorCallCountersTotal = SnapshotSupervisorCallCounters(powerPcCore);
     var supervisorCallCountersDelta = ComputeCounterDelta(
         supervisorCallCountersBaseline,
@@ -463,6 +476,40 @@ try
     Console.WriteLine($"Halted: {state.Machine.Halted}");
     Console.WriteLine($"FinalProgramCounter: 0x{state.Machine.ProgramCounter:X8}");
     Console.WriteLine($"NullProgramCounterRedirects: {nullProgramCounterRedirectCount}");
+
+    if (nullProgramCounterRedirectCountBaseline > 0)
+    {
+        Console.WriteLine($"NullProgramCounterRedirectsTotal: {nullProgramCounterRedirectCountTotal}");
+    }
+
+    if (nullProgramCounterRedirectSourceCounts.Count > 0)
+    {
+        Console.WriteLine("NullProgramCounterRedirectSources:");
+
+        foreach (var (source, hits) in nullProgramCounterRedirectSourceCounts)
+        {
+            Console.WriteLine($"  Source={source} Hits={hits}");
+        }
+    }
+
+    if (nullProgramCounterRedirectEvents.Length > 0)
+    {
+        Console.WriteLine("NullProgramCounterRedirectTrace:");
+
+        foreach (var redirectEvent in nullProgramCounterRedirectEvents.TakeLast(12))
+        {
+            var stackAddress = redirectEvent.StackAddress.HasValue
+                ? $"0x{redirectEvent.StackAddress.Value:X8}"
+                : "-";
+            Console.WriteLine(
+                $"  SRC={redirectEvent.Source} TARGET=0x{redirectEvent.RedirectTarget:X8} CAND=0x{redirectEvent.CandidateValue:X8} " +
+                $"STACK={stackAddress} SP=0x{redirectEvent.StackPointer:X8} LR=0x{redirectEvent.LinkRegister:X8} " +
+                $"R30=0x{redirectEvent.Register30:X8} R31=0x{redirectEvent.Register31:X8} " +
+                $"S-18=0x{redirectEvent.StackWordMinus24:X8} S-14=0x{redirectEvent.StackWordMinus20:X8} " +
+                $"S-10=0x{redirectEvent.StackWordMinus16:X8} S+0=0x{redirectEvent.StackWordAtPointer:X8} " +
+                $"S+4=0x{redirectEvent.StackWordPlus4:X8} S+8=0x{redirectEvent.StackWordPlus8:X8}");
+        }
+    }
 
     if (traceRun.ProgramCounterTail.Count > 0)
     {
@@ -692,6 +739,7 @@ try
             namedGlobals,
             cliOptions.ProfileNames,
             nullProgramCounterRedirectCount,
+            nullProgramCounterRedirectEvents,
             supervisorCallCountersTotal,
             supervisorCallCountersDelta,
             supervisorTracer?.CallTrace ?? Array.Empty<PowerPcSupervisorCallTraceEntry>(),
@@ -3132,6 +3180,7 @@ static ProbeRunReport CreateProbeReport(
     IReadOnlyDictionary<string, uint> namedGlobals,
     IReadOnlyList<string> profileNames,
     long nullProgramCounterRedirectCount,
+    IReadOnlyList<PowerPcNullProgramCounterRedirectEvent> nullProgramCounterRedirectEvents,
     IReadOnlyDictionary<uint, long> supervisorCallCountersTotal,
     IReadOnlyDictionary<uint, long> supervisorCallCountersDelta,
     IReadOnlyList<PowerPcSupervisorCallTraceEntry> supervisorCallTrace,
@@ -3162,6 +3211,31 @@ static ProbeRunReport CreateProbeReport(
             $"0x{entry.PreviousValue:X8}",
             $"0x{entry.CurrentValue:X8}"))
         .ToArray();
+    var nullProgramCounterRedirectTrace = nullProgramCounterRedirectEvents
+        .TakeLast(64)
+        .Select(entry => new ProbeNullProgramCounterRedirectReport(
+            entry.Source.ToString(),
+            $"0x{entry.RedirectTarget:X8}",
+            $"0x{entry.CandidateValue:X8}",
+            entry.StackAddress.HasValue ? $"0x{entry.StackAddress.Value:X8}" : null,
+            $"0x{entry.StackPointer:X8}",
+            $"0x{entry.LinkRegister:X8}",
+            $"0x{entry.Register30:X8}",
+            $"0x{entry.Register31:X8}",
+            $"0x{entry.StackWordMinus24:X8}",
+            $"0x{entry.StackWordMinus20:X8}",
+            $"0x{entry.StackWordMinus16:X8}",
+            $"0x{entry.StackWordAtPointer:X8}",
+            $"0x{entry.StackWordPlus4:X8}",
+            $"0x{entry.StackWordPlus8:X8}"))
+        .ToArray();
+    var nullProgramCounterRedirectSourceCounts = nullProgramCounterRedirectEvents
+        .GroupBy(entry => entry.Source)
+        .OrderBy(entry => entry.Key)
+        .ToDictionary(
+            entry => entry.Key.ToString(),
+            entry => (long)entry.LongCount(),
+            StringComparer.Ordinal);
     var supervisorTrace = supervisorCallTrace
         .Take(128)
         .Select(entry => new ProbeSupervisorCallTraceReport(
@@ -3218,6 +3292,8 @@ static ProbeRunReport CreateProbeReport(
         stopOnSupervisorServiceReached,
         profileNames.ToArray(),
         nullProgramCounterRedirectCount,
+        nullProgramCounterRedirectSourceCounts,
+        nullProgramCounterRedirectTrace,
         globalValues,
         trackedHits,
         hotSpots,
@@ -3316,6 +3392,8 @@ file sealed record ProbeRunReport(
     bool StopOnSupervisorServiceReached,
     IReadOnlyList<string> Profiles,
     long NullProgramCounterRedirectCount,
+    IReadOnlyDictionary<string, long> NullProgramCounterRedirectSources,
+    IReadOnlyList<ProbeNullProgramCounterRedirectReport> NullProgramCounterRedirectTrace,
     IReadOnlyDictionary<string, string> Globals32,
     IReadOnlyDictionary<string, long> TrackedProgramCounterHits,
     IReadOnlyList<ProbeHotSpotReport> HotSpots,
@@ -3335,6 +3413,22 @@ file sealed record ProbeMemoryWatchEventReport(
     string Address,
     string PreviousValue,
     string CurrentValue);
+
+file sealed record ProbeNullProgramCounterRedirectReport(
+    string Source,
+    string RedirectTarget,
+    string CandidateValue,
+    string? StackAddress,
+    string StackPointer,
+    string LinkRegister,
+    string Register30,
+    string Register31,
+    string StackWordMinus24,
+    string StackWordMinus20,
+    string StackWordMinus16,
+    string StackWordAtPointer,
+    string StackWordPlus4,
+    string StackWordPlus8);
 
 file sealed record ProbeSupervisorCallTraceReport(
     string ProgramCounter,

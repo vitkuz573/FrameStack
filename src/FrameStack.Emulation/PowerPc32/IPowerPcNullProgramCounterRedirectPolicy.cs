@@ -6,5 +6,5 @@ public interface IPowerPcNullProgramCounterRedirectPolicy
         PowerPc32RegisterFile registers,
         Func<uint, uint> readDataWord,
         Func<uint, uint> readInstructionWord,
-        out uint redirectTarget);
+        out PowerPcNullProgramCounterRedirectResolution resolution);
 }
