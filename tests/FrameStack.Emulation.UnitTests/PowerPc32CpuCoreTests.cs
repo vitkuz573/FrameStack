@@ -132,6 +132,49 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void CmplwShouldWriteSelectedConditionRegisterField()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7D03_2040); // cmplw cr2, r3, r4
+
+        cpu.Reset(0x1000);
+        cpu.Registers.Cr = 0x1234_5678;
+        cpu.Registers[3] = 1;
+        cpu.Registers[4] = 2;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1284_5678u, cpu.Registers.Cr);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void CmplwBranchShouldUseSelectedConditionRegisterField()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7D03_2040); // cmplw cr2, r3, r4
+        memory.WriteUInt32(0x1004, 0x418A_0008); // beq cr2, +8
+        memory.WriteUInt32(0x1008, 0x38A0_0001); // li r5, 1
+        memory.WriteUInt32(0x100C, 0x38C0_0002); // li r6, 2
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0xBEEF;
+        cpu.Registers[4] = 0xBEEF;
+
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0u, cpu.Registers[5]);
+        Assert.Equal(2u, cpu.Registers[6]);
+        Assert.Equal(0x1010u, cpu.ProgramCounter);
+    }
+
+    [Fact]
     public void OriShouldReadRsAndWriteRa()
     {
         var cpu = new PowerPc32CpuCore();
@@ -1158,6 +1201,8 @@ public sealed class PowerPc32CpuCoreTests
     {
         public bool TryResolveRedirectTarget(
             PowerPc32RegisterFile registers,
+            Func<uint, uint> readDataWord,
+            Func<uint, uint> readInstructionWord,
             out uint resolvedTarget)
         {
             resolvedTarget = redirectTarget;

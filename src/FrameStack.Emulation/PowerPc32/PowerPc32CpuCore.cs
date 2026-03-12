@@ -240,7 +240,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         if (pc == 0)
         {
-            TryRedirectNullProgramCounter();
+            TryRedirectNullProgramCounter(memoryBus);
         }
 
         // PowerPC time-base advances independently from mftb reads.
@@ -587,7 +587,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _registers.Pc += 4;
     }
 
-    private bool TryRedirectNullProgramCounter()
+    private bool TryRedirectNullProgramCounter(IMemoryBus memoryBus)
     {
         if (!NullProgramCounterRedirectEnabled)
         {
@@ -599,7 +599,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
             return false;
         }
 
-        if (!_nullProgramCounterRedirectPolicy.TryResolveRedirectTarget(_registers, out var redirectTarget) ||
+        if (!_nullProgramCounterRedirectPolicy.TryResolveRedirectTarget(
+                _registers,
+                effectiveAddress => ReadDataUInt32(memoryBus, effectiveAddress),
+                effectiveAddress => memoryBus.ReadUInt32(TranslateInstructionAddress(effectiveAddress)),
+                out var redirectTarget) ||
             redirectTarget == 0)
         {
             return false;
@@ -835,8 +839,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case 28: // and
                 ExecuteAndRegister(instruction);
                 break;
-            case 32: // cmplw -> CR0
-                SetCrFieldForUnsignedCompare(0, _registers[instruction.Ra], _registers[instruction.Rb]);
+            case 32: // cmplw
+                SetCrFieldForUnsignedCompare(
+                    instruction.ConditionRegisterField,
+                    _registers[instruction.Ra],
+                    _registers[instruction.Rb]);
                 _registers.Pc += 4;
                 break;
             case 40: // subf

@@ -4,5 +4,7 @@ public interface IPowerPcNullProgramCounterRedirectPolicy
 {
     bool TryResolveRedirectTarget(
         PowerPc32RegisterFile registers,
+        Func<uint, uint> readDataWord,
+        Func<uint, uint> readInstructionWord,
         out uint redirectTarget);
 }
