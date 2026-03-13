@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using FrameStack.Emulation.Images;
 using FrameStack.Emulation.PowerPc32;
@@ -34,6 +35,9 @@ Console.WriteLine($"EntryPoint: 0x{inspection.EntryPoint:X8}");
 Console.WriteLine($"Segments: {inspection.Sections.Count}");
 Console.WriteLine($"Summary: {inspection.Summary}");
 Console.WriteLine($"MemoryMb: {invocation.MemoryMb}");
+Console.WriteLine(
+    $"MaxInstructions: {(invocation.MaxInstructions?.ToString(CultureInfo.InvariantCulture) ?? "Unlimited")}");
+Console.WriteLine($"DynarecEnabled: {!invocation.DisableDynarec}");
 Console.WriteLine("Press Ctrl+C to stop execution.");
 Console.WriteLine($"RunnerDebug: {invocation.RunnerDebug}");
 #if DEBUG
@@ -58,6 +62,7 @@ try
 
     if (powerPcCore is not null)
     {
+        powerPcCore.DynarecEnabled = !invocation.DisableDynarec;
         consoleOutputSink = new BufferedConsoleCharacterSink();
         powerPcCore.SupervisorCallHandler = new RunnerConsoleOutputSupervisorCallHandler(
             powerPcCore.SupervisorCallHandler,
@@ -81,7 +86,32 @@ try
 
     while (!state.Machine.Halted && !cancellationRequested)
     {
-        var summary = state.Machine.Run(chunkBudget);
+        if (invocation.MaxInstructions.HasValue &&
+            executed >= invocation.MaxInstructions.Value)
+        {
+            stopReason = "InstructionLimit";
+            break;
+        }
+
+        var currentChunkBudget = chunkBudget;
+
+        if (invocation.MaxInstructions.HasValue)
+        {
+            var remainingInstructions = invocation.MaxInstructions.Value - executed;
+
+            if (remainingInstructions <= 0)
+            {
+                stopReason = "InstructionLimit";
+                break;
+            }
+
+            if (remainingInstructions < currentChunkBudget)
+            {
+                currentChunkBudget = (int)remainingInstructions;
+            }
+        }
+
+        var summary = state.Machine.Run(currentChunkBudget);
 
         if (summary.ExecutedInstructions > 0)
         {
@@ -110,6 +140,11 @@ try
     if (cancellationRequested)
     {
         stopReason = "Interrupted";
+    }
+    else if (invocation.MaxInstructions.HasValue &&
+             executed >= invocation.MaxInstructions.Value)
+    {
+        stopReason = "InstructionLimit";
     }
     else if (state.Machine.Halted)
     {

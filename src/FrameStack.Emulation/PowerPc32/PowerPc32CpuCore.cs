@@ -42,6 +42,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const int JitCompileThreshold = 64;
     private const int JitMaxInstructionsPerBlock = 96;
     private const int JitMaxWarmupEntries = 65_536;
+    private const int JitProbeCooldownInstructions = 16;
+    private const int JitMaxCompiledBlocks = 4_096;
+    private const int JitMaxRejectedBlocks = 65_536;
 
     private readonly PowerPc32RegisterFile _registers = new();
     private readonly Dictionary<int, uint> _extendedSpr = new();
@@ -64,6 +67,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private int _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
     private long _nullProgramCounterRedirectCount;
     private int _jitBlockSequence;
+    private int _jitProbeCooldown;
+    private bool _hasLastJitBlock;
+    private JitBlockKey _lastJitBlockKey;
+    private JitCompiledBlock _lastJitBlock;
     private static readonly MethodInfo JitAdvanceTimeMethod =
         GetRequiredInstanceMethod(nameof(JitAdvanceTime));
     private static readonly MethodInfo JitAddImmediateMethod =
@@ -161,6 +168,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
     public bool NullProgramCounterRedirectEnabled { get; set; } = true;
 
     public bool DynarecEnabled { get; set; } = true;
+
+    public bool DynarecCodeWriteInvalidationEnabled { get; set; }
 
     public int CompiledJitBlockCount => _jitCompiledBlocks.Count;
 
@@ -512,10 +521,26 @@ public sealed class PowerPc32CpuCore : ICpuCore
         {
             var remainingBudget = instructionBudget - executed;
 
-            if (TryExecuteJitBlock(memoryBus, remainingBudget, out var jitExecuted))
+            if (TryExecuteCachedJitBlock(memoryBus, remainingBudget, out var cachedJitExecuted))
+            {
+                executed += cachedJitExecuted;
+                continue;
+            }
+
+            if (_jitProbeCooldown <= 0 &&
+                TryExecuteJitBlock(memoryBus, remainingBudget, out var jitExecuted))
             {
                 executed += jitExecuted;
                 continue;
+            }
+
+            if (_jitProbeCooldown <= 0)
+            {
+                _jitProbeCooldown = JitProbeCooldownInstructions;
+            }
+            else
+            {
+                _jitProbeCooldown--;
             }
 
             ExecuteCycle(memoryBus);
@@ -523,6 +548,40 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         return executed;
+    }
+
+    private bool TryExecuteCachedJitBlock(IMemoryBus memoryBus, int remainingBudget, out int executed)
+    {
+        executed = 0;
+
+        if (!DynarecEnabled ||
+            !_hasLastJitBlock ||
+            remainingBudget <= 0 ||
+            _registers.Pc == 0)
+        {
+            return false;
+        }
+
+        var key = new JitBlockKey(
+            _registers.Pc,
+            _machineStateRegister,
+            _instructionTlbGeneration,
+            _preserveHighBitOn8MbTranslation);
+
+        if (key != _lastJitBlockKey)
+        {
+            return false;
+        }
+
+        executed = _lastJitBlock.Executor(this, memoryBus, remainingBudget);
+
+        if (executed > 0)
+        {
+            return true;
+        }
+
+        RemoveJitBlock(key);
+        return false;
     }
 
     private bool TryExecuteJitBlock(IMemoryBus memoryBus, int remainingBudget, out int executed)
@@ -542,6 +601,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
             _instructionTlbGeneration,
             _preserveHighBitOn8MbTranslation);
 
+        if (_jitRejectedBlocks.Count >= JitMaxRejectedBlocks)
+        {
+            _jitRejectedBlocks.Clear();
+        }
+
         if (_jitRejectedBlocks.Contains(key))
         {
             return false;
@@ -555,7 +619,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
             }
 
             _jitWarmupCounters.TryGetValue(key, out var warmupHits);
-            warmupHits++;
+            warmupHits += JitProbeCooldownInstructions + 1;
 
             if (warmupHits < JitCompileThreshold)
             {
@@ -576,6 +640,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
             RegisterJitBlock(key, block);
         }
 
+        _lastJitBlockKey = key;
+        _lastJitBlock = block;
+        _hasLastJitBlock = true;
         executed = block.Executor(this, memoryBus, remainingBudget);
 
         if (executed <= 0)
@@ -1159,6 +1226,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private void RegisterJitBlock(JitBlockKey key, JitCompiledBlock block)
     {
+        if (_jitCompiledBlocks.Count >= JitMaxCompiledBlocks)
+        {
+            ClearJitCache();
+        }
+
         _jitCompiledBlocks[key] = block;
         _jitRejectedBlocks.Remove(key);
 
@@ -1184,6 +1256,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _jitCompiledBlocks.Remove(key);
         _jitWarmupCounters.Remove(key);
         _jitRejectedBlocks.Remove(key);
+        if (_hasLastJitBlock &&
+            key == _lastJitBlockKey)
+        {
+            _hasLastJitBlock = false;
+        }
 
         foreach (var translatedCodePage in block.TranslatedCodePages)
         {
@@ -1207,10 +1284,17 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _jitWarmupCounters.Clear();
         _jitRejectedBlocks.Clear();
         _jitBlocksByTranslatedCodePage.Clear();
+        _hasLastJitBlock = false;
+        _jitProbeCooldown = 0;
     }
 
     private void InvalidateJitForTranslatedWrite(uint translatedAddress, int accessSize)
     {
+        if (!DynarecCodeWriteInvalidationEnabled)
+        {
+            return;
+        }
+
         if (_jitBlocksByTranslatedCodePage.Count == 0)
         {
             return;

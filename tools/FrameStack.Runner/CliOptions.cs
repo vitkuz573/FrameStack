@@ -12,4 +12,14 @@ internal static class CliOptions
     {
         Description = "Enable runner diagnostic status output.",
     };
+
+    internal static readonly Option<long?> MaxInstructions = new("--max-instructions")
+    {
+        Description = "Stop after executing the specified number of instructions.",
+    };
+
+    internal static readonly Option<bool> DisableDynarec = new("--disable-dynarec")
+    {
+        Description = "Disable PPC dynarec/JIT and use interpreter-only execution.",
+    };
 }

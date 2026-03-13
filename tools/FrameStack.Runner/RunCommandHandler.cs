@@ -4,7 +4,9 @@ using System.CommandLine.Parsing;
 internal sealed record RunCliInvocation(
     string ImagePath,
     int MemoryMb,
-    bool RunnerDebug);
+    bool RunnerDebug,
+    long? MaxInstructions,
+    bool DisableDynarec);
 
 internal static class RunCommandHandler
 {
@@ -74,6 +76,8 @@ internal static class RunCommandHandler
         command.Arguments.Add(CliArguments.ImagePath);
         command.Options.Add(CliOptions.MemoryMb);
         command.Options.Add(CliOptions.RunnerDebug);
+        command.Options.Add(CliOptions.MaxInstructions);
+        command.Options.Add(CliOptions.DisableDynarec);
         return command;
     }
 
@@ -88,9 +92,19 @@ internal static class RunCommandHandler
             throw new ArgumentException("Option '--memory-mb' requires a positive integer value.");
         }
 
+        var maxInstructions = parseResult.GetValue(CliOptions.MaxInstructions);
+
+        if (maxInstructions.HasValue &&
+            maxInstructions.Value <= 0)
+        {
+            throw new ArgumentException("Option '--max-instructions' requires a positive integer value.");
+        }
+
         return new RunCliInvocation(
             imagePath,
             memoryMb,
-            parseResult.GetValue(CliOptions.RunnerDebug));
+            parseResult.GetValue(CliOptions.RunnerDebug),
+            maxInstructions,
+            parseResult.GetValue(CliOptions.DisableDynarec));
     }
 }
