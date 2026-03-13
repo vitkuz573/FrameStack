@@ -10,7 +10,6 @@ namespace FrameStack.Emulation.Runtime;
 public sealed class RuntimeImageBootstrapper
 {
     private const uint OneMbInBytes = 1024u * 1024u;
-    private const int CiscoC2600ReportedMemoryMaxMb = 128;
     private const uint CiscoC2600BootMode = 1;
     private const uint CiscoC2600BootInfoPointer = 0x8000_BD00;
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
@@ -109,7 +108,7 @@ public sealed class RuntimeImageBootstrapper
         if (loadedImage.Architecture == ImageArchitecture.PowerPc32 &&
             loadedImage.Endianness == ImageEndianness.BigEndian)
         {
-            var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb, inspection);
+            var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb);
             var nullProgramCounterRedirectPolicy =
                 ResolvePowerPcNullProgramCounterRedirectPolicy(loadedImage, inspection);
 
@@ -125,20 +124,6 @@ public sealed class RuntimeImageBootstrapper
     private static uint ResolvePowerPcReportedMemoryBytes(int memoryMb)
     {
         return checked((uint)memoryMb * OneMbInBytes);
-    }
-
-    private static uint ResolvePowerPcReportedMemoryBytes(
-        int memoryMb,
-        ImageInspectionResult inspection)
-    {
-        var effectiveMemoryMb = memoryMb;
-
-        if (string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
-        {
-            effectiveMemoryMb = Math.Min(effectiveMemoryMb, CiscoC2600ReportedMemoryMaxMb);
-        }
-
-        return ResolvePowerPcReportedMemoryBytes(effectiveMemoryMb);
     }
 
     private static CiscoPowerPcNullProgramCounterRedirectPolicy? ResolvePowerPcNullProgramCounterRedirectPolicy(
