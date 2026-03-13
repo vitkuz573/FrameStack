@@ -87,9 +87,19 @@ public sealed class MemoryMappedBus : IMemoryBus, IMemoryWriteProtectionBus
 
     public uint ReadUInt32(uint address)
     {
+        if (_deviceMappings.Count == 0)
+        {
+            return _backingBus.ReadUInt32(address);
+        }
+
         if (TryResolveDevice(address, sizeof(uint), out var mapping, out var offset))
         {
             return mapping.Device.ReadUInt32(offset);
+        }
+
+        if (!HasMappedDeviceOverlap(address, sizeof(uint)))
+        {
+            return _backingBus.ReadUInt32(address);
         }
 
         // Cross-device or edge-case reads fallback to byte-granular composition.
@@ -106,9 +116,21 @@ public sealed class MemoryMappedBus : IMemoryBus, IMemoryWriteProtectionBus
 
     public void WriteUInt32(uint address, uint value)
     {
+        if (_deviceMappings.Count == 0)
+        {
+            _backingBus.WriteUInt32(address, value);
+            return;
+        }
+
         if (TryResolveDevice(address, sizeof(uint), out var mapping, out var offset))
         {
             mapping.Device.WriteUInt32(offset, value);
+            return;
+        }
+
+        if (!HasMappedDeviceOverlap(address, sizeof(uint)))
+        {
+            _backingBus.WriteUInt32(address, value);
             return;
         }
 

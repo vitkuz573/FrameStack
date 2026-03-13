@@ -1,4 +1,5 @@
 using FrameStack.Emulation.Abstractions;
+using FrameStack.Emulation.PowerPc32;
 
 namespace FrameStack.Emulation.Core;
 
@@ -35,6 +36,17 @@ public sealed class EmulationMachine
         if (instructionBudget <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(instructionBudget), "Instruction budget must be greater than zero.");
+        }
+
+        if (_cpu is PowerPc32CpuCore powerPcCore)
+        {
+            var executedFastPath = powerPcCore.ExecuteCycles(_memoryBus, instructionBudget);
+            ExecutedInstructions += executedFastPath;
+
+            return new ExecutionSummary(
+                executedFastPath,
+                _cpu.Halted,
+                _cpu.ProgramCounter);
         }
 
         var executedThisRun = 0;

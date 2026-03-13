@@ -7,11 +7,13 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
     private const int PageSize = 4096;
     private const int PageShift = 12;
     private const uint PageMask = PageSize - 1;
+    private const int AddressSpacePageCount = 1 << (32 - PageShift);
 
     private readonly ulong _maxMappedBytes;
-    private readonly Dictionary<uint, byte[]> _pages = new();
+    private readonly byte[]?[] _pages = new byte[AddressSpacePageCount][];
     private readonly List<WriteProtectedRange> _writeProtectedRanges = [];
     private int _privilegedWriteScopeDepth;
+    private int _mappedPageCount;
 
     public ulong MaxMappedBytes => _maxMappedBytes;
 
@@ -48,10 +50,11 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
 
     public byte ReadByte(uint address)
     {
-        var pageIndex = address >> PageShift;
+        var pageIndex = (int)(address >> PageShift);
         var pageOffset = (int)(address & PageMask);
+        var page = _pages[pageIndex];
 
-        if (!_pages.TryGetValue(pageIndex, out var page))
+        if (page is null)
         {
             return 0;
         }
@@ -75,12 +78,14 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
 
     public uint ReadUInt32(uint address)
     {
-        var pageIndex = address >> PageShift;
+        var pageIndex = (int)(address >> PageShift);
         var pageOffset = (int)(address & PageMask);
 
         if (pageOffset <= PageSize - sizeof(uint))
         {
-            if (!_pages.TryGetValue(pageIndex, out var page))
+            var page = _pages[pageIndex];
+
+            if (page is null)
             {
                 return 0;
             }
@@ -158,13 +163,20 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
 
     public IReadOnlyList<SparseMemoryPageSnapshot> CreateSnapshot()
     {
-        var snapshots = new List<SparseMemoryPageSnapshot>(_pages.Count);
+        var snapshots = new List<SparseMemoryPageSnapshot>(_mappedPageCount);
 
-        foreach (var (pageIndex, pageData) in _pages.OrderBy(entry => entry.Key))
+        for (var pageIndex = 0; pageIndex < _pages.Length; pageIndex++)
         {
+            var pageData = _pages[pageIndex];
+
+            if (pageData is null)
+            {
+                continue;
+            }
+
             var dataCopy = new byte[PageSize];
             Buffer.BlockCopy(pageData, 0, dataCopy, 0, PageSize);
-            snapshots.Add(new SparseMemoryPageSnapshot(pageIndex, dataCopy));
+            snapshots.Add(new SparseMemoryPageSnapshot((uint)pageIndex, dataCopy));
         }
 
         return snapshots;
@@ -172,7 +184,8 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
 
     public void RestoreSnapshot(IEnumerable<SparseMemoryPageSnapshot> pages)
     {
-        _pages.Clear();
+        Array.Clear(_pages, 0, _pages.Length);
+        _mappedPageCount = 0;
 
         foreach (var page in pages)
         {
@@ -182,12 +195,25 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
                     $"Sparse page {page.PageIndex} has invalid length {page.Data.Length}, expected {PageSize}.");
             }
 
+            if (page.PageIndex >= AddressSpacePageCount)
+            {
+                throw new InvalidOperationException(
+                    $"Sparse page index {page.PageIndex} exceeds 32-bit address space.");
+            }
+
             var pageCopy = new byte[PageSize];
             Buffer.BlockCopy(page.Data, 0, pageCopy, 0, PageSize);
-            _pages[page.PageIndex] = pageCopy;
+            var pageIndex = (int)page.PageIndex;
+
+            if (_pages[pageIndex] is null)
+            {
+                _mappedPageCount++;
+            }
+
+            _pages[pageIndex] = pageCopy;
         }
 
-        var mappedBytes = checked((ulong)_pages.Count * PageSize);
+        var mappedBytes = checked((ulong)_mappedPageCount * PageSize);
 
         if (mappedBytes > _maxMappedBytes)
         {
@@ -198,12 +224,15 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
 
     private byte[] GetOrCreatePage(uint pageIndex)
     {
-        if (_pages.TryGetValue(pageIndex, out var existing))
+        var pageIndexInt = (int)pageIndex;
+        var existing = _pages[pageIndexInt];
+
+        if (existing is not null)
         {
             return existing;
         }
 
-        var projectedBytes = checked(((ulong)_pages.Count + 1UL) * PageSize);
+        var projectedBytes = checked(((ulong)_mappedPageCount + 1UL) * PageSize);
 
         if (projectedBytes > _maxMappedBytes)
         {
@@ -212,7 +241,8 @@ public sealed class SparseMemoryBus : IMemoryBus, IMemoryWriteProtectionBus
         }
 
         var page = new byte[PageSize];
-        _pages[pageIndex] = page;
+        _pages[pageIndexInt] = page;
+        _mappedPageCount++;
         return page;
     }
 

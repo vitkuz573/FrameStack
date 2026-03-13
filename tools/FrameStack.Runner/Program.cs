@@ -5,7 +5,6 @@ using FrameStack.Emulation.Runtime;
 
 const int FastChunkBudget = 20_000_000;
 const int DebugChunkBudget = 500_000;
-const int ConsoleTraceMaxEvents = 0;
 const double StatusIntervalSeconds = 2.0;
 
 if (!RunCommandHandler.TryParse(args, out var invocation, out var cliExitCode))
@@ -54,18 +53,12 @@ try
         invocation.MemoryMb);
 
     var powerPcCore = state.CpuCore as PowerPc32CpuCore;
-    PowerPcTracingSupervisorCallHandler? supervisorTracer = null;
 
     if (powerPcCore is not null)
     {
-        supervisorTracer = new PowerPcTracingSupervisorCallHandler(
+        powerPcCore.SupervisorCallHandler = new RunnerConsoleOutputSupervisorCallHandler(
             powerPcCore.SupervisorCallHandler,
-            ConsoleTraceMaxEvents,
-            captureConsoleOutput: false)
-        {
-            ConsoleCharacterSink = static character => Console.Write(character),
-        };
-        powerPcCore.SupervisorCallHandler = supervisorTracer;
+            static character => Console.Write(character));
     }
 
     var cancellationRequested = false;
@@ -175,4 +168,50 @@ catch (Exception exception)
     }
 
     return 3;
+}
+
+file sealed class RunnerConsoleOutputSupervisorCallHandler : IPowerPcSupervisorCallHandler
+{
+    private const uint PutCharacterService = 0x01;
+    private readonly IPowerPcSupervisorCallHandler _inner;
+    private readonly Action<char> _consoleCharacterSink;
+
+    public RunnerConsoleOutputSupervisorCallHandler(
+        IPowerPcSupervisorCallHandler inner,
+        Action<char> consoleCharacterSink)
+    {
+        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        _consoleCharacterSink = consoleCharacterSink ?? throw new ArgumentNullException(nameof(consoleCharacterSink));
+    }
+
+    public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
+    {
+        if (context.ServiceCode == PutCharacterService)
+        {
+            var value = unchecked((byte)context.Argument0);
+            char? character = null;
+
+            switch (value)
+            {
+                case (byte)'\r':
+                case (byte)'\n':
+                case (byte)'\t':
+                    character = (char)value;
+                    break;
+            }
+
+            if (!character.HasValue &&
+                value is >= 0x20 and <= 0x7E)
+            {
+                character = (char)value;
+            }
+
+            if (character.HasValue)
+            {
+                _consoleCharacterSink(character.Value);
+            }
+        }
+
+        return _inner.Handle(context);
+    }
 }

@@ -46,6 +46,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private readonly IPowerPcNullProgramCounterRedirectPolicy? _nullProgramCounterRedirectPolicy;
     private uint _machineStateRegister;
     private ulong _timeBaseCounter;
+    private AddressTranslationCache _instructionTranslationCache;
+    private AddressTranslationCache _dataTranslationCache;
+    private uint _instructionTlbGeneration;
+    private uint _dataTlbGeneration;
+    private bool _preserveHighBitOn8MbTranslation = true;
     private int _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
     private long _nullProgramCounterRedirectCount;
 
@@ -84,7 +89,20 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     public bool NullProgramCounterRedirectEnabled { get; set; } = true;
 
-    public bool PreserveHighBitOn8MbTranslation { get; set; } = true;
+    public bool PreserveHighBitOn8MbTranslation
+    {
+        get => _preserveHighBitOn8MbTranslation;
+        set
+        {
+            if (_preserveHighBitOn8MbTranslation == value)
+            {
+                return;
+            }
+
+            _preserveHighBitOn8MbTranslation = value;
+            InvalidateTranslationCaches();
+        }
+    }
 
     public Action<PowerPcMemoryAccessTraceEntry>? MemoryAccessTraceSink { get; set; }
 
@@ -123,12 +141,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
     public void WriteMachineStateRegister(uint value)
     {
         _machineStateRegister = value;
+        InvalidateTranslationCaches();
     }
 
     public void Reset(uint entryPoint)
     {
         _registers.Pc = entryPoint;
         Halted = false;
+        InvalidateTranslationCaches();
     }
 
     public void SetHalted(bool halted)
@@ -234,6 +254,40 @@ public sealed class PowerPc32CpuCore : ICpuCore
         {
             _supervisorCallCounters[serviceCode] = hits;
         }
+
+        unchecked
+        {
+            _instructionTlbGeneration++;
+            _dataTlbGeneration++;
+        }
+
+        InvalidateTranslationCaches();
+    }
+
+    private void InvalidateTranslationCaches()
+    {
+        _instructionTranslationCache = default;
+        _dataTranslationCache = default;
+    }
+
+    private void BumpInstructionTlbGeneration()
+    {
+        unchecked
+        {
+            _instructionTlbGeneration++;
+        }
+
+        _instructionTranslationCache = default;
+    }
+
+    private void BumpDataTlbGeneration()
+    {
+        unchecked
+        {
+            _dataTlbGeneration++;
+        }
+
+        _dataTranslationCache = default;
     }
 
     public void ExecuteCycle(IMemoryBus memoryBus)
@@ -366,6 +420,24 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 throw new NotSupportedException(
                     $"Unsupported PowerPC32 opcode 0x{instruction.Opcode:X2} at PC=0x{pc:X8}, INSN=0x{instructionWord:X8}.");
         }
+    }
+
+    public int ExecuteCycles(IMemoryBus memoryBus, int instructionBudget)
+    {
+        if (instructionBudget <= 0)
+        {
+            return 0;
+        }
+
+        var executed = 0;
+
+        while (!Halted && executed < instructionBudget)
+        {
+            ExecuteCycle(memoryBus);
+            executed++;
+        }
+
+        return executed;
     }
 
     private void ExecuteTrapDoublewordImmediate()
@@ -940,7 +1012,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 ExecuteMoveToConditionRegisterFields(instruction);
                 break;
             case 146: // mtmsr
-                _machineStateRegister = _registers[instruction.Rs];
+                WriteMachineStateRegister(_registers[instruction.Rs]);
                 _registers.Pc += 4;
                 break;
             case 138: // adde
@@ -1625,6 +1697,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         var effectivePageNumber = _extendedSpr.GetValueOrDefault(Mpc8xxInstructionEpnSpr, 0u);
         var tableWalkControl = _extendedSpr.GetValueOrDefault(Mpc8xxInstructionTableWalkControlSpr, 0u);
         _instructionTlb[index] = new Mpc8xxTlbEntry(effectivePageNumber, realPageNumber, tableWalkControl);
+        BumpInstructionTlbGeneration();
     }
 
     private void InstallDataTlbEntry(uint realPageNumber)
@@ -1633,6 +1706,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         var effectivePageNumber = _extendedSpr.GetValueOrDefault(Mpc8xxDataEpnSpr, 0u);
         var tableWalkControl = _extendedSpr.GetValueOrDefault(Mpc8xxDataTableWalkControlSpr, 0u);
         _dataTlb[index] = new Mpc8xxTlbEntry(effectivePageNumber, realPageNumber, tableWalkControl);
+        BumpDataTlbGeneration();
     }
 
     private static int ExtractMpc8xxTlbIndex(uint controlRegisterValue)
@@ -1650,7 +1724,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return TranslateAddress(
             effectiveAddress,
             _instructionTlb,
-            PreserveHighBitOn8MbTranslation);
+            _instructionTlbGeneration,
+            ref _instructionTranslationCache);
     }
 
     private uint TranslateDataAddress(uint effectiveAddress)
@@ -1663,15 +1738,29 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return TranslateAddress(
             effectiveAddress,
             _dataTlb,
-            PreserveHighBitOn8MbTranslation);
+            _dataTlbGeneration,
+            ref _dataTranslationCache);
     }
 
-    private static uint TranslateAddress(
+    private uint TranslateAddress(
         uint effectiveAddress,
-        IReadOnlyList<Mpc8xxTlbEntry?> tlb,
-        bool preserveHighBitOn8MbTranslation)
+        Mpc8xxTlbEntry?[] tlb,
+        uint tlbGeneration,
+        ref AddressTranslationCache cache)
     {
-        for (var index = 0; index < tlb.Count; index++)
+        if (cache.IsValid &&
+            cache.TlbGeneration == tlbGeneration &&
+            cache.PreserveHighBitOn8MbTranslation == _preserveHighBitOn8MbTranslation)
+        {
+            var pageBaseMask = ~cache.PageOffsetMask;
+
+            if ((effectiveAddress & pageBaseMask) == cache.EffectivePageBase)
+            {
+                return cache.TranslatedPageBase | (effectiveAddress & cache.PageOffsetMask);
+            }
+        }
+
+        for (var index = 0; index < tlb.Length; index++)
         {
             var entry = tlb[index];
 
@@ -1691,7 +1780,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
             var translatedPageBase = entry.Value.RealPageNumber & pageBaseMask;
 
-            if (preserveHighBitOn8MbTranslation &&
+            if (_preserveHighBitOn8MbTranslation &&
                 pageSize == 8u * 1024u * 1024u &&
                 (translatedPageBase & 0x8000_0000u) == 0 &&
                 (entry.Value.EffectivePageNumber & 0x8000_0000u) != 0)
@@ -1700,9 +1789,17 @@ public sealed class PowerPc32CpuCore : ICpuCore
             }
 
             var translatedOffset = effectiveAddress & pageOffsetMask;
+            cache = new AddressTranslationCache(
+                IsValid: true,
+                TlbGeneration: tlbGeneration,
+                PreserveHighBitOn8MbTranslation: _preserveHighBitOn8MbTranslation,
+                EffectivePageBase: effectiveAddress & pageBaseMask,
+                TranslatedPageBase: translatedPageBase,
+                PageOffsetMask: pageOffsetMask);
             return translatedPageBase | translatedOffset;
         }
 
+        cache = default;
         return effectiveAddress;
     }
 
@@ -1733,18 +1830,29 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         Array.Clear(_instructionTlb, 0, _instructionTlb.Length);
         Array.Clear(_dataTlb, 0, _dataTlb.Length);
+        BumpInstructionTlbGeneration();
+        BumpDataTlbGeneration();
     }
 
     private void InvalidateMpc8xxTlbEntriesForEffectiveAddress(uint effectiveAddress)
     {
-        InvalidateMpc8xxTlbEntriesForEffectiveAddress(_instructionTlb, effectiveAddress);
-        InvalidateMpc8xxTlbEntriesForEffectiveAddress(_dataTlb, effectiveAddress);
+        if (InvalidateMpc8xxTlbEntriesForEffectiveAddress(_instructionTlb, effectiveAddress))
+        {
+            BumpInstructionTlbGeneration();
+        }
+
+        if (InvalidateMpc8xxTlbEntriesForEffectiveAddress(_dataTlb, effectiveAddress))
+        {
+            BumpDataTlbGeneration();
+        }
     }
 
-    private static void InvalidateMpc8xxTlbEntriesForEffectiveAddress(
+    private static bool InvalidateMpc8xxTlbEntriesForEffectiveAddress(
         Mpc8xxTlbEntry?[] tlb,
         uint effectiveAddress)
     {
+        var invalidated = false;
+
         for (var index = 0; index < tlb.Length; index++)
         {
             var entry = tlb[index];
@@ -1764,19 +1872,29 @@ public sealed class PowerPc32CpuCore : ICpuCore
             }
 
             tlb[index] = null;
+            invalidated = true;
         }
+
+        return invalidated;
     }
 
     private uint ReadDataUInt32(IMemoryBus memoryBus, uint effectiveAddress)
     {
         var translatedAddress = TranslateDataAddress(effectiveAddress);
         var value = memoryBus.ReadUInt32(translatedAddress);
-        TraceMemoryAccess(
-            PowerPcMemoryAccessType.Read,
-            effectiveAddress,
-            translatedAddress,
-            sizeof(uint),
-            value);
+        var traceSink = MemoryAccessTraceSink;
+
+        if (traceSink is not null)
+        {
+            traceSink(new PowerPcMemoryAccessTraceEntry(
+                _registers.Pc,
+                PowerPcMemoryAccessType.Read,
+                effectiveAddress,
+                translatedAddress,
+                sizeof(uint),
+                value));
+        }
+
         return value;
     }
 
@@ -1784,24 +1902,37 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         var translatedAddress = TranslateDataAddress(effectiveAddress);
         memoryBus.WriteUInt32(translatedAddress, value);
-        TraceMemoryAccess(
-            PowerPcMemoryAccessType.Write,
-            effectiveAddress,
-            translatedAddress,
-            sizeof(uint),
-            value);
+        var traceSink = MemoryAccessTraceSink;
+
+        if (traceSink is not null)
+        {
+            traceSink(new PowerPcMemoryAccessTraceEntry(
+                _registers.Pc,
+                PowerPcMemoryAccessType.Write,
+                effectiveAddress,
+                translatedAddress,
+                sizeof(uint),
+                value));
+        }
     }
 
     private byte ReadDataByte(IMemoryBus memoryBus, uint effectiveAddress)
     {
         var translatedAddress = TranslateDataAddress(effectiveAddress);
         var value = memoryBus.ReadByte(translatedAddress);
-        TraceMemoryAccess(
-            PowerPcMemoryAccessType.Read,
-            effectiveAddress,
-            translatedAddress,
-            sizeof(byte),
-            value);
+        var traceSink = MemoryAccessTraceSink;
+
+        if (traceSink is not null)
+        {
+            traceSink(new PowerPcMemoryAccessTraceEntry(
+                _registers.Pc,
+                PowerPcMemoryAccessType.Read,
+                effectiveAddress,
+                translatedAddress,
+                sizeof(byte),
+                value));
+        }
+
         return value;
     }
 
@@ -1809,35 +1940,18 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         var translatedAddress = TranslateDataAddress(effectiveAddress);
         memoryBus.WriteByte(translatedAddress, value);
-        TraceMemoryAccess(
-            PowerPcMemoryAccessType.Write,
-            effectiveAddress,
-            translatedAddress,
-            sizeof(byte),
-            value);
-    }
-
-    private void TraceMemoryAccess(
-        PowerPcMemoryAccessType accessType,
-        uint effectiveAddress,
-        uint physicalAddress,
-        int sizeBytes,
-        uint value)
-    {
         var traceSink = MemoryAccessTraceSink;
 
-        if (traceSink is null)
+        if (traceSink is not null)
         {
-            return;
+            traceSink(new PowerPcMemoryAccessTraceEntry(
+                _registers.Pc,
+                PowerPcMemoryAccessType.Write,
+                effectiveAddress,
+                translatedAddress,
+                sizeof(byte),
+                value));
         }
-
-        traceSink(new PowerPcMemoryAccessTraceEntry(
-            _registers.Pc,
-            accessType,
-            effectiveAddress,
-            physicalAddress,
-            sizeBytes,
-            value));
     }
 
     private bool TryReadSupervisorUInt32(IMemoryBus memoryBus, uint effectiveAddress, out uint value)
@@ -2068,6 +2182,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 entry.TableWalkControl);
         }
     }
+
+    private readonly record struct AddressTranslationCache(
+        bool IsValid,
+        uint TlbGeneration,
+        bool PreserveHighBitOn8MbTranslation,
+        uint EffectivePageBase,
+        uint TranslatedPageBase,
+        uint PageOffsetMask);
 
     private readonly record struct Mpc8xxTlbEntry(
         uint EffectivePageNumber,
