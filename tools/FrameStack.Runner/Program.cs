@@ -3,8 +3,9 @@ using FrameStack.Emulation.Images;
 using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
 
-const int RuntimeChunkBudget = 20_000_000;
+const int RuntimeChunkBudget = 500_000;
 const int ConsoleTraceMaxEvents = 0;
+const double StatusIntervalSeconds = 2.0;
 
 if (!RunCommandHandler.TryParse(args, out var invocation, out var cliExitCode))
 {
@@ -66,6 +67,7 @@ try
     var executed = 0L;
     var consoleEmittedLength = 0;
     var runStopwatch = Stopwatch.StartNew();
+    var statusStopwatch = Stopwatch.StartNew();
     var stopReason = "Halted";
 
     while (!state.Machine.Halted && !cancellationRequested)
@@ -78,6 +80,17 @@ try
         }
 
         EmitConsoleDelta(supervisorTracer, ref consoleEmittedLength);
+
+        if (statusStopwatch.Elapsed.TotalSeconds >= StatusIntervalSeconds)
+        {
+            var ips = runStopwatch.Elapsed.TotalSeconds > 0
+                ? executed / runStopwatch.Elapsed.TotalSeconds
+                : 0;
+
+            Console.WriteLine(
+                $"[runner] executed={executed} pc=0x{state.Machine.ProgramCounter:X8} ips={ips:F0}");
+            statusStopwatch.Restart();
+        }
 
         if (summary.ExecutedInstructions == 0)
         {
