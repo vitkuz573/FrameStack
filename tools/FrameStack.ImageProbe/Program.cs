@@ -709,6 +709,7 @@ if (powerPcCore is not null)
             $"CR=0x{powerPcCore.Registers.Cr:X8} XER=0x{powerPcCore.Registers.Xer:X8} MSR=0x{powerPcCore.MachineStateRegister:X8}");
         PrintSpecialPurposeRegisters(powerPcCore);
         PrintPowerPcTlbEntries(powerPcCore);
+        PrintPowerPcStopSnapshot(state.Machine, powerPcCore);
     }
 
     var namedGlobals = ReadNamedGlobals(
@@ -898,7 +899,10 @@ if (powerPcCore is not null)
                 $"LR=0x{entry.LinkRegister:X8} CALLER={callerPc} " +
                 $"A0=0x{entry.Argument0:X8} A1=0x{entry.Argument1:X8} " +
                 $"A2=0x{entry.Argument2:X8} A3=0x{entry.Argument3:X8} " +
-                $"RET=0x{entry.ReturnValue:X8} HALT={entry.Halt} NEXT={nextPc}");
+                $"RET=0x{entry.ReturnValue:X8} HALT={entry.Halt} NEXT={nextPc} " +
+                $"SP=0x{entry.StackPointer:X8} R30=0x{entry.Register30:X8} R31=0x{entry.Register31:X8} " +
+                $"S-10=0x{entry.StackWordMinus16:X8} S+0=0x{entry.StackWordAtPointer:X8} " +
+                $"S+4=0x{entry.StackWordPlus4:X8} S+8=0x{entry.StackWordPlus8:X8}");
         }
 
         if (supervisorTracer.CallTrace.Count > 40)
@@ -2860,6 +2864,37 @@ static void PrintPowerPcTlbEntrySet(IReadOnlyList<PowerPc32TlbEntryState> entrie
     }
 }
 
+static void PrintPowerPcStopSnapshot(
+    EmulationMachine machine,
+    PowerPc32CpuCore powerPcCore)
+{
+    var stackPointer = powerPcCore.Registers[1];
+    var dataTlbEntries = powerPcCore.GetDataTlbEntries();
+    Console.WriteLine(
+        $"StopStackSnapshot: PC=0x{powerPcCore.ProgramCounter:X8} SP=0x{stackPointer:X8} " +
+        $"LR=0x{powerPcCore.Registers.Lr:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
+    Console.WriteLine("StopStackWords:");
+
+    for (var offset = -32; offset <= 96; offset += 4)
+    {
+        var effectiveAddress = unchecked((uint)((int)stackPointer + offset));
+        var directValue = machine.ReadUInt32(effectiveAddress);
+        var marker = offset == 0 ? "*" : " ";
+
+        if (TryTranslateViaMpc8xxTlbEntries(dataTlbEntries, effectiveAddress, out var translatedAddress))
+        {
+            var translatedValue = machine.ReadUInt32(translatedAddress);
+            Console.WriteLine(
+                $"{marker} OFF={offset,4:+#;-#;0} EA=0x{effectiveAddress:X8} DIRECT=0x{directValue:X8} " +
+                $"PA=0x{translatedAddress:X8} VALUE=0x{translatedValue:X8}");
+            continue;
+        }
+
+        Console.WriteLine(
+            $"{marker} OFF={offset,4:+#;-#;0} EA=0x{effectiveAddress:X8} DIRECT=0x{directValue:X8}");
+    }
+}
+
 static IReadOnlyDictionary<string, uint> ReadNamedGlobals(
     EmulationMachine machine,
     IReadOnlyList<NamedAddress> namedAddresses,
@@ -3246,6 +3281,47 @@ static ProbePowerPcCpuStateReport CreatePowerPcCpuStateReport(PowerPc32CpuCore p
         SpecialPurposeRegisters: specialPurposeRegisters);
 }
 
+static ProbePowerPcStopSnapshotReport CreatePowerPcStopSnapshotReport(
+    EmulationMachine machine,
+    PowerPc32CpuCore powerPcCore)
+{
+    var stackPointer = powerPcCore.Registers[1];
+    var dataTlbEntries = powerPcCore.GetDataTlbEntries();
+    var stackWords = new List<ProbePowerPcStackWordReport>();
+
+    for (var offset = -32; offset <= 96; offset += 4)
+    {
+        var effectiveAddress = unchecked((uint)((int)stackPointer + offset));
+        var directValue = machine.ReadUInt32(effectiveAddress);
+        string? translatedAddress = null;
+        string? translatedValue = null;
+
+        if (TryTranslateViaMpc8xxTlbEntries(dataTlbEntries, effectiveAddress, out var physicalAddress))
+        {
+            translatedAddress = $"0x{physicalAddress:X8}";
+            translatedValue = $"0x{machine.ReadUInt32(physicalAddress):X8}";
+        }
+
+        stackWords.Add(new ProbePowerPcStackWordReport(
+            Offset: offset,
+            EffectiveAddress: $"0x{effectiveAddress:X8}",
+            DirectValue: $"0x{directValue:X8}",
+            PhysicalAddress: translatedAddress,
+            PhysicalValue: translatedValue));
+    }
+
+    return new ProbePowerPcStopSnapshotReport(
+        ProgramCounter: $"0x{powerPcCore.ProgramCounter:X8}",
+        StackPointer: $"0x{stackPointer:X8}",
+        LinkRegister: $"0x{powerPcCore.Registers.Lr:X8}",
+        Register30: $"0x{powerPcCore.Registers[30]:X8}",
+        Register31: $"0x{powerPcCore.Registers[31]:X8}",
+        CounterRegister: $"0x{powerPcCore.Registers.Ctr:X8}",
+        ConditionRegister: $"0x{powerPcCore.Registers.Cr:X8}",
+        MachineStateRegister: $"0x{powerPcCore.MachineStateRegister:X8}",
+        StackWords: stackWords);
+}
+
 static IReadOnlyList<ProbeTlbEntryReport> CreateTlbEntryReports(
     IReadOnlyList<PowerPc32TlbEntryState> entries)
 {
@@ -3379,7 +3455,14 @@ static ProbeRunReport CreateProbeReport(
             $"0x{entry.Argument3:X8}",
             $"0x{entry.ReturnValue:X8}",
             entry.Halt,
-            entry.NextProgramCounter.HasValue ? $"0x{entry.NextProgramCounter.Value:X8}" : null))
+            entry.NextProgramCounter.HasValue ? $"0x{entry.NextProgramCounter.Value:X8}" : null,
+            $"0x{entry.StackPointer:X8}",
+            $"0x{entry.Register30:X8}",
+            $"0x{entry.Register31:X8}",
+            $"0x{entry.StackWordMinus16:X8}",
+            $"0x{entry.StackWordAtPointer:X8}",
+            $"0x{entry.StackWordPlus4:X8}",
+            $"0x{entry.StackWordPlus8:X8}"))
         .ToArray();
     var supervisorCallsTotal = supervisorCallCountersTotal
         .OrderBy(entry => entry.Key)
@@ -3409,6 +3492,9 @@ static ProbeRunReport CreateProbeReport(
     var powerPcCpuState = powerPcCore is null
         ? null
         : CreatePowerPcCpuStateReport(powerPcCore);
+    var powerPcStopSnapshot = powerPcCore is null
+        ? null
+        : CreatePowerPcStopSnapshotReport(state.Machine, powerPcCore);
     var instructionTlb = powerPcCore is null
         ? Array.Empty<ProbeTlbEntryReport>()
         : CreateTlbEntryReports(powerPcCore.GetInstructionTlbEntries());
@@ -3466,6 +3552,7 @@ static ProbeRunReport CreateProbeReport(
         supervisorSignatures,
         supervisorTrace,
         powerPcCpuState,
+        powerPcStopSnapshot,
         instructionTlb,
         dataTlb,
         consoleOutput);
@@ -3613,6 +3700,7 @@ sealed record ProbeRunReport(
     IReadOnlyDictionary<string, long> SupervisorSignatures,
     IReadOnlyList<ProbeSupervisorCallTraceReport> SupervisorTrace,
     ProbePowerPcCpuStateReport? PowerPcCpuState,
+    ProbePowerPcStopSnapshotReport? PowerPcStopSnapshot,
     IReadOnlyList<ProbeTlbEntryReport> InstructionTlb,
     IReadOnlyList<ProbeTlbEntryReport> DataTlb,
     string ConsoleOutput);
@@ -3674,7 +3762,14 @@ sealed record ProbeSupervisorCallTraceReport(
     string Argument3,
     string ReturnValue,
     bool Halt,
-    string? NextProgramCounter);
+    string? NextProgramCounter,
+    string StackPointer,
+    string Register30,
+    string Register31,
+    string StackWordMinus16,
+    string StackWordAtPointer,
+    string StackWordPlus4,
+    string StackWordPlus8);
 
 sealed record ProbeSupervisorCallsiteReport(
     string ServiceCode,
@@ -3700,6 +3795,24 @@ sealed record ProbePowerPcCpuStateReport(
     string MachineStateRegister,
     IReadOnlyDictionary<string, string> GeneralPurposeRegisters,
     IReadOnlyDictionary<string, string> SpecialPurposeRegisters);
+
+sealed record ProbePowerPcStopSnapshotReport(
+    string ProgramCounter,
+    string StackPointer,
+    string LinkRegister,
+    string Register30,
+    string Register31,
+    string CounterRegister,
+    string ConditionRegister,
+    string MachineStateRegister,
+    IReadOnlyList<ProbePowerPcStackWordReport> StackWords);
+
+sealed record ProbePowerPcStackWordReport(
+    int Offset,
+    string EffectiveAddress,
+    string DirectValue,
+    string? PhysicalAddress,
+    string? PhysicalValue);
 
 sealed record ProbeTlbEntryReport(
     int Index,

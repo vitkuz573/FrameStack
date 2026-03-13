@@ -59,6 +59,11 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
             _maxTraceEntries > 0 &&
             _callTrace.Count < _maxTraceEntries)
         {
+            var stackWordMinus16 = TryReadStackWord(context, -16);
+            var stackWordAtPointer = TryReadStackWord(context, 0);
+            var stackWordPlus4 = TryReadStackWord(context, 4);
+            var stackWordPlus8 = TryReadStackWord(context, 8);
+
             _callTrace.Add(new PowerPcSupervisorCallTraceEntry(
                 context.ProgramCounter,
                 context.ServiceCode,
@@ -69,10 +74,30 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
                 context.LinkRegister,
                 result.ReturnValue,
                 result.Halt,
-                result.NextProgramCounter));
+                result.NextProgramCounter,
+                context.StackPointer,
+                context.Register30,
+                context.Register31,
+                stackWordMinus16,
+                stackWordAtPointer,
+                stackWordPlus4,
+                stackWordPlus8));
         }
 
         return result;
+    }
+
+    private static uint TryReadStackWord(PowerPcSupervisorCallContext context, int offset)
+    {
+        if (context.StackPointer == 0)
+        {
+            return 0;
+        }
+
+        var effectiveAddress = unchecked((uint)((int)context.StackPointer + offset));
+        return context.TryReadDataUInt32(effectiveAddress, out var value)
+            ? value
+            : 0;
     }
 
     private static void IncrementCounter<TKey>(IDictionary<TKey, long> dictionary, TKey key)
