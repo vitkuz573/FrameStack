@@ -1331,12 +1331,12 @@ public sealed class PowerPc32CpuCoreTests
         memory.WriteUInt32(0x1004, 0x4200_FFFC); // bdnz 0x1000
 
         cpu.Reset(0x1000);
-        cpu.Registers.Ctr = 40;
+        cpu.Registers.Ctr = 80;
 
-        var executed = cpu.ExecuteCycles(memory, 80);
+        var executed = cpu.ExecuteCycles(memory, 160);
 
-        Assert.Equal(80, executed);
-        Assert.Equal(40u, cpu.Registers[3]);
+        Assert.Equal(160, executed);
+        Assert.Equal(80u, cpu.Registers[3]);
         Assert.Equal(0u, cpu.Registers.Ctr);
         Assert.Equal(0x1008u, cpu.ProgramCounter);
         Assert.True(cpu.CompiledJitBlockCount > 0);

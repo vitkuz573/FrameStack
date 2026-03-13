@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using FrameStack.Emulation.Images;
 using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
@@ -44,6 +45,7 @@ Console.WriteLine("BuildConfiguration: Release");
 var bootstrapper = new RuntimeImageBootstrapper(
     analyzer,
     [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+BufferedConsoleCharacterSink? consoleOutputSink = null;
 
 try
 {
@@ -56,9 +58,10 @@ try
 
     if (powerPcCore is not null)
     {
+        consoleOutputSink = new BufferedConsoleCharacterSink();
         powerPcCore.SupervisorCallHandler = new RunnerConsoleOutputSupervisorCallHandler(
             powerPcCore.SupervisorCallHandler,
-            static character => Console.Write(character));
+            consoleOutputSink.Write);
     }
 
     var cancellationRequested = false;
@@ -154,6 +157,7 @@ try
 }
 catch (Exception exception)
 {
+    consoleOutputSink?.Flush();
     Console.WriteLine();
     Console.WriteLine("Runner Failed:");
     Console.WriteLine(exception.Message);
@@ -168,6 +172,10 @@ catch (Exception exception)
     }
 
     return 3;
+}
+finally
+{
+    consoleOutputSink?.Flush();
 }
 
 file sealed class RunnerConsoleOutputSupervisorCallHandler : IPowerPcSupervisorCallHandler
@@ -213,5 +221,53 @@ file sealed class RunnerConsoleOutputSupervisorCallHandler : IPowerPcSupervisorC
         }
 
         return _inner.Handle(context);
+    }
+}
+
+file sealed class BufferedConsoleCharacterSink
+{
+    private const int FlushThreshold = 64;
+    private const int HashFlushThreshold = 4;
+    private readonly object _sync = new();
+    private readonly StringBuilder _buffer = new(FlushThreshold);
+    private int _hashCounter;
+
+    public void Write(char character)
+    {
+        lock (_sync)
+        {
+            _buffer.Append(character);
+            _hashCounter = character == '#'
+                ? _hashCounter + 1
+                : 0;
+
+            if (character == '\n' ||
+                character == ':' ||
+                _buffer.Length >= FlushThreshold ||
+                _hashCounter >= HashFlushThreshold)
+            {
+                FlushUnsafe();
+            }
+        }
+    }
+
+    public void Flush()
+    {
+        lock (_sync)
+        {
+            FlushUnsafe();
+        }
+    }
+
+    private void FlushUnsafe()
+    {
+        if (_buffer.Length == 0)
+        {
+            return;
+        }
+
+        Console.Write(_buffer.ToString());
+        _buffer.Clear();
+        _hashCounter = 0;
     }
 }
