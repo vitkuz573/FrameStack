@@ -61,9 +61,22 @@ internal static class ProbeCommandHandler
             return false;
         }
 
-        invocation = Bind(parseResult);
-        exitCode = 0;
-        return true;
+        try
+        {
+            invocation = Bind(parseResult);
+            exitCode = 0;
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or FormatException or OverflowException)
+        {
+            Console.WriteLine($"CLI validation error: {exception.Message}");
+            Console.WriteLine();
+            rootCommand.Parse("--help").Invoke();
+            invocation = null;
+            exitCode = 1;
+            return false;
+        }
     }
 
     private static RootCommand BuildRootCommand()
@@ -142,12 +155,10 @@ internal static class ProbeCommandHandler
             memoryMb,
             timelineSteps,
             ParseRegisterOverrides(registerOverrideTokens),
-            BuildCliOptions(parseResult, registerOverrideTokens));
+            BuildCliOptions(parseResult));
     }
 
-    private static ProbeCliOptions BuildCliOptions(
-        ParseResult parseResult,
-        string[] registerOverrideTokens)
+    private static ProbeCliOptions BuildCliOptions(ParseResult parseResult)
     {
         var chunkBudgetValue = parseResult.GetValue(CliOptions.ChunkBudget);
         var chunkBudget = chunkBudgetValue.HasValue
@@ -387,8 +398,7 @@ internal static class ProbeCommandHandler
             namedGlobalEffectiveAddresses,
             profileNames.ToArray(),
             parseResult.GetValue(CliOptions.DisableNullProgramCounterRedirect),
-            parseResult.GetValue(CliOptions.Disable8MbHighBitAlias),
-            registerOverrideTokens);
+            parseResult.GetValue(CliOptions.Disable8MbHighBitAlias));
     }
 
     private static void ApplyProbeProfiles(

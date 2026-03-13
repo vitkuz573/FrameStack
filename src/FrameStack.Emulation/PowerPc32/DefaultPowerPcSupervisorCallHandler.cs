@@ -12,9 +12,8 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private const uint DefaultReportedMemoryBytes = 64u * 1024u * 1024u;
     private const uint DefaultIoMemoryProfilePercent = 20;
     private const uint MaxIoMemoryProfileValue = 125;
-    private const uint IoMemoryProfileOffsetEncodingBase = 100;
     private const uint IoMemoryDescriptorTimingClassWord = 0x0000_8000;
-    private const uint IoMemoryDescriptorAdapterCodeWord = 0x0091_0000;
+    private const uint IoMemoryDescriptorAdapterCodeWord = 0x0091_0091;
     private const uint IoMemorySizingProbeBytes = 0x0040_0000;
 
     private readonly uint _reportedMemoryBytes;
@@ -42,8 +41,19 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
             }
 
             if (context.Argument1 == 0 &&
+                context.Argument2 >= 0x8000_0000 &&
+                context.Argument3 == 0)
+            {
+                // IOS probes this path as an allocation-status query and expects
+                // a zero success code, not the requested byte count.
+                return new PowerPcSupervisorCallResult(ReturnValue: 0);
+            }
+
+            if (context.Argument1 == 0 &&
                 context.Argument0 > 0 &&
-                context.Argument0 <= _reportedMemoryBytes)
+                context.Argument0 <= _reportedMemoryBytes &&
+                context.Argument2 == 0 &&
+                context.Argument3 == 0)
             {
                 return new PowerPcSupervisorCallResult(ReturnValue: context.Argument0);
             }
@@ -131,17 +141,11 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
 
     private static uint EncodeIoMemoryProfile(uint ioMemoryProfilePercent)
     {
-        return ioMemoryProfilePercent + IoMemoryProfileOffsetEncodingBase;
+        return ioMemoryProfilePercent;
     }
 
     private static uint NormalizeIoMemoryProfile(uint rawValue)
     {
-        if (rawValue >= IoMemoryProfileOffsetEncodingBase &&
-            rawValue <= IoMemoryProfileOffsetEncodingBase + MaxIoMemoryProfileValue)
-        {
-            rawValue -= IoMemoryProfileOffsetEncodingBase;
-        }
-
         if (rawValue > MaxIoMemoryProfileValue)
         {
             return 0;

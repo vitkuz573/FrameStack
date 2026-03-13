@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Diagnostics;
 using System.Text.Json;
+using FrameStack.Emulation.Abstractions;
 using FrameStack.Emulation.Core;
 using FrameStack.Emulation.Images;
 using FrameStack.Emulation.Memory;
@@ -1850,10 +1851,7 @@ static ProbeCheckpoint CreateCheckpoint(
         throw new NotSupportedException("Checkpointing currently supports only PowerPC32 CPU state.");
     }
 
-    if (state.Machine.MemoryBus is not SparseMemoryBus memory)
-    {
-        throw new NotSupportedException("Checkpointing currently supports only SparseMemoryBus.");
-    }
+    var memory = ResolveCheckpointSparseMemoryBus(state.Machine.MemoryBus);
 
     return new ProbeCheckpoint(
         executedInstructionsFromBoot,
@@ -1872,10 +1870,7 @@ static void RestoreCheckpoint(
         throw new NotSupportedException("Checkpoint restore currently supports only PowerPC32 CPU state.");
     }
 
-    if (state.Machine.MemoryBus is not SparseMemoryBus memory)
-    {
-        throw new NotSupportedException("Checkpoint restore currently supports only SparseMemoryBus.");
-    }
+    var memory = ResolveCheckpointSparseMemoryBus(state.Machine.MemoryBus);
 
     if (checkpoint.MemoryMb > configuredMemoryMb)
     {
@@ -1885,6 +1880,23 @@ static void RestoreCheckpoint(
 
     memory.RestoreSnapshot(checkpoint.MemoryPages);
     cpu.RestoreSnapshot(checkpoint.CpuSnapshot);
+}
+
+static SparseMemoryBus ResolveCheckpointSparseMemoryBus(IMemoryBus memoryBus)
+{
+    if (memoryBus is SparseMemoryBus sparseMemoryBus)
+    {
+        return sparseMemoryBus;
+    }
+
+    if (memoryBus is MemoryMappedBus mappedBus &&
+        mappedBus.BackingBus is SparseMemoryBus mappedSparseMemoryBus)
+    {
+        return mappedSparseMemoryBus;
+    }
+
+    throw new NotSupportedException(
+        $"Checkpointing currently supports SparseMemoryBus-backed runtimes, got '{memoryBus.GetType().Name}'.");
 }
 
 static void SaveCheckpoint(string checkpointFilePath, ProbeCheckpoint checkpoint)
@@ -3516,8 +3528,7 @@ sealed record ProbeCliOptions(
     IReadOnlyList<NamedAddress> NamedGlobalEffectiveAddresses,
     IReadOnlyList<string> ProfileNames,
     bool DisableNullProgramCounterRedirect,
-    bool Disable8MbHighBitAlias,
-    string[] RegisterOverrideTokens);
+    bool Disable8MbHighBitAlias);
 
 sealed record TracedRunResult(
     long ExecutedInstructions,
