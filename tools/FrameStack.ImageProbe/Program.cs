@@ -2869,10 +2869,14 @@ static void PrintPowerPcStopSnapshot(
     PowerPc32CpuCore powerPcCore)
 {
     var stackPointer = powerPcCore.Registers[1];
+    var programCounter = powerPcCore.ProgramCounter;
+    var linkRegister = powerPcCore.Registers.Lr;
     var dataTlbEntries = powerPcCore.GetDataTlbEntries();
+    var offsetsMatchingProgramCounter = new List<int>();
+    var offsetsMatchingLinkRegister = new List<int>();
     Console.WriteLine(
-        $"StopStackSnapshot: PC=0x{powerPcCore.ProgramCounter:X8} SP=0x{stackPointer:X8} " +
-        $"LR=0x{powerPcCore.Registers.Lr:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
+        $"StopStackSnapshot: PC=0x{programCounter:X8} SP=0x{stackPointer:X8} " +
+        $"LR=0x{linkRegister:X8} R30=0x{powerPcCore.Registers[30]:X8} R31=0x{powerPcCore.Registers[31]:X8}");
     Console.WriteLine("StopStackWords:");
 
     for (var offset = -32; offset <= 96; offset += 4)
@@ -2880,6 +2884,16 @@ static void PrintPowerPcStopSnapshot(
         var effectiveAddress = unchecked((uint)((int)stackPointer + offset));
         var directValue = machine.ReadUInt32(effectiveAddress);
         var marker = offset == 0 ? "*" : " ";
+
+        if (directValue == programCounter)
+        {
+            offsetsMatchingProgramCounter.Add(offset);
+        }
+
+        if (directValue == linkRegister)
+        {
+            offsetsMatchingLinkRegister.Add(offset);
+        }
 
         if (TryTranslateViaMpc8xxTlbEntries(dataTlbEntries, effectiveAddress, out var translatedAddress))
         {
@@ -2893,6 +2907,11 @@ static void PrintPowerPcStopSnapshot(
         Console.WriteLine(
             $"{marker} OFF={offset,4:+#;-#;0} EA=0x{effectiveAddress:X8} DIRECT=0x{directValue:X8}");
     }
+
+    Console.WriteLine(
+        $"StopStackSignals: LR_EQ_PC={linkRegister == programCounter} " +
+        $"PC_OFFSETS={FormatStackOffsets(offsetsMatchingProgramCounter)} " +
+        $"LR_OFFSETS={FormatStackOffsets(offsetsMatchingLinkRegister)}");
 }
 
 static IReadOnlyDictionary<string, uint> ReadNamedGlobals(
@@ -3286,8 +3305,12 @@ static ProbePowerPcStopSnapshotReport CreatePowerPcStopSnapshotReport(
     PowerPc32CpuCore powerPcCore)
 {
     var stackPointer = powerPcCore.Registers[1];
+    var programCounter = powerPcCore.ProgramCounter;
+    var linkRegister = powerPcCore.Registers.Lr;
     var dataTlbEntries = powerPcCore.GetDataTlbEntries();
     var stackWords = new List<ProbePowerPcStackWordReport>();
+    var stackOffsetsMatchingProgramCounter = new List<int>();
+    var stackOffsetsMatchingLinkRegister = new List<int>();
 
     for (var offset = -32; offset <= 96; offset += 4)
     {
@@ -3302,6 +3325,16 @@ static ProbePowerPcStopSnapshotReport CreatePowerPcStopSnapshotReport(
             translatedValue = $"0x{machine.ReadUInt32(physicalAddress):X8}";
         }
 
+        if (directValue == programCounter)
+        {
+            stackOffsetsMatchingProgramCounter.Add(offset);
+        }
+
+        if (directValue == linkRegister)
+        {
+            stackOffsetsMatchingLinkRegister.Add(offset);
+        }
+
         stackWords.Add(new ProbePowerPcStackWordReport(
             Offset: offset,
             EffectiveAddress: $"0x{effectiveAddress:X8}",
@@ -3311,14 +3344,17 @@ static ProbePowerPcStopSnapshotReport CreatePowerPcStopSnapshotReport(
     }
 
     return new ProbePowerPcStopSnapshotReport(
-        ProgramCounter: $"0x{powerPcCore.ProgramCounter:X8}",
+        ProgramCounter: $"0x{programCounter:X8}",
         StackPointer: $"0x{stackPointer:X8}",
-        LinkRegister: $"0x{powerPcCore.Registers.Lr:X8}",
+        LinkRegister: $"0x{linkRegister:X8}",
         Register30: $"0x{powerPcCore.Registers[30]:X8}",
         Register31: $"0x{powerPcCore.Registers[31]:X8}",
         CounterRegister: $"0x{powerPcCore.Registers.Ctr:X8}",
         ConditionRegister: $"0x{powerPcCore.Registers.Cr:X8}",
         MachineStateRegister: $"0x{powerPcCore.MachineStateRegister:X8}",
+        LinkRegisterEqualsProgramCounter: linkRegister == programCounter,
+        StackOffsetsMatchingProgramCounter: stackOffsetsMatchingProgramCounter,
+        StackOffsetsMatchingLinkRegister: stackOffsetsMatchingLinkRegister,
         StackWords: stackWords);
 }
 
@@ -3556,6 +3592,18 @@ static ProbeRunReport CreateProbeReport(
         instructionTlb,
         dataTlb,
         consoleOutput);
+}
+
+static string FormatStackOffsets(IReadOnlyList<int> offsets)
+{
+    if (offsets.Count == 0)
+    {
+        return "-";
+    }
+
+    return string.Join(
+        ",",
+        offsets.Select(offset => offset.ToString("+#;-#;0", CultureInfo.InvariantCulture)));
 }
 
 static void SaveProbeReport(string reportJsonPath, ProbeRunReport report)
@@ -3805,6 +3853,9 @@ sealed record ProbePowerPcStopSnapshotReport(
     string CounterRegister,
     string ConditionRegister,
     string MachineStateRegister,
+    bool LinkRegisterEqualsProgramCounter,
+    IReadOnlyList<int> StackOffsetsMatchingProgramCounter,
+    IReadOnlyList<int> StackOffsetsMatchingLinkRegister,
     IReadOnlyList<ProbePowerPcStackWordReport> StackWords);
 
 sealed record ProbePowerPcStackWordReport(
