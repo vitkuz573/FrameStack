@@ -262,24 +262,25 @@ file sealed class RunnerConsoleOutputSupervisorCallHandler : IPowerPcSupervisorC
 file sealed class BufferedConsoleCharacterSink
 {
     private const int FlushThreshold = 64;
-    private const int HashFlushThreshold = 4;
     private readonly object _sync = new();
     private readonly StringBuilder _buffer = new(FlushThreshold);
-    private int _hashCounter;
 
     public void Write(char character)
     {
         lock (_sync)
         {
             _buffer.Append(character);
-            _hashCounter = character == '#'
-                ? _hashCounter + 1
-                : 0;
+
+            if (character == '#')
+            {
+                // Keep decompression progress visually smooth.
+                FlushUnsafe();
+                return;
+            }
 
             if (character == '\n' ||
                 character == ':' ||
-                _buffer.Length >= FlushThreshold ||
-                _hashCounter >= HashFlushThreshold)
+                _buffer.Length >= FlushThreshold)
             {
                 FlushUnsafe();
             }
@@ -303,6 +304,5 @@ file sealed class BufferedConsoleCharacterSink
 
         Console.Write(_buffer.ToString());
         _buffer.Clear();
-        _hashCounter = 0;
     }
 }
