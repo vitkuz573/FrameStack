@@ -116,6 +116,22 @@ dotnet run --project tools/FrameStack.ImageProbe -- /path/to/cisco.bin \
   --report-json .tmp/reports/c2600-run.json
 ```
 
+## Runtime Runner CLI
+
+Run an image in a continuous execution loop with live console output (without probe traces):
+
+```bash
+dotnet run --project tools/FrameStack.Runner -- /absolute/path/to/image.bin \
+  --memory-mb 256
+```
+
+Options:
+
+- `image-path`
+- `--memory-mb` (optional, default `256`)
+
+`Runner` streams IOS console output and runs until firmware halts or you stop it with `Ctrl+C`.
+
 ## Main API
 
 - `POST /api/v1/images` - register a local image artifact.
