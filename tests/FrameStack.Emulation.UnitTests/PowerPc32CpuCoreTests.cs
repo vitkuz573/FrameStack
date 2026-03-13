@@ -1321,6 +1321,67 @@ public sealed class PowerPc32CpuCoreTests
         Assert.Equal(0u, cpu.Registers[4]);
     }
 
+    [Fact]
+    public void ExecuteCyclesShouldCompileAndRunBdnzLoopWithDynarec()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0x3863_0001); // addi r3, r3, 1
+        memory.WriteUInt32(0x1004, 0x4200_FFFC); // bdnz 0x1000
+
+        cpu.Reset(0x1000);
+        cpu.Registers.Ctr = 40;
+
+        var executed = cpu.ExecuteCycles(memory, 80);
+
+        Assert.Equal(80, executed);
+        Assert.Equal(40u, cpu.Registers[3]);
+        Assert.Equal(0u, cpu.Registers.Ctr);
+        Assert.Equal(0x1008u, cpu.ProgramCounter);
+        Assert.True(cpu.CompiledJitBlockCount > 0);
+    }
+
+    [Fact]
+    public void ExecuteCyclesShouldCompileAndRunImmediateBranchLoopWithDynarec()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0x38A5_0001); // addi r5, r5, 1
+        memory.WriteUInt32(0x1004, 0x4BFF_FFFC); // b 0x1000
+
+        cpu.Reset(0x1000);
+
+        var executed = cpu.ExecuteCycles(memory, 200);
+
+        Assert.Equal(200, executed);
+        Assert.Equal(100u, cpu.Registers[5]);
+        Assert.Equal(0x1000u, cpu.ProgramCounter);
+        Assert.True(cpu.CompiledJitBlockCount > 0);
+    }
+
+    [Fact]
+    public void ExecuteCyclesShouldSkipDynarecWhenDisabled()
+    {
+        var cpu = new PowerPc32CpuCore
+        {
+            DynarecEnabled = false
+        };
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0x38A5_0001); // addi r5, r5, 1
+        memory.WriteUInt32(0x1004, 0x4BFF_FFFC); // b 0x1000
+
+        cpu.Reset(0x1000);
+
+        var executed = cpu.ExecuteCycles(memory, 40);
+
+        Assert.Equal(40, executed);
+        Assert.Equal(20u, cpu.Registers[5]);
+        Assert.Equal(0, cpu.CompiledJitBlockCount);
+    }
+
     private sealed class StaticSupervisorCallHandler(PowerPcSupervisorCallResult result)
         : IPowerPcSupervisorCallHandler
     {

@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Reflection.Emit;
 using FrameStack.Emulation.Abstractions;
 
 namespace FrameStack.Emulation.PowerPc32;
@@ -36,6 +38,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const uint MachineStateDataRelocationMask = 0x0000_0010;
     private const uint MachineStateInstructionRelocationMask = 0x0000_0020;
     private const int MaxNullProgramCounterRedirectEvents = 64;
+    private const int JitCodePageShift = 12;
+    private const int JitCompileThreshold = 8;
+    private const int JitMaxInstructionsPerBlock = 96;
+    private const int JitMaxWarmupEntries = 65_536;
 
     private readonly PowerPc32RegisterFile _registers = new();
     private readonly Dictionary<int, uint> _extendedSpr = new();
@@ -44,6 +50,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private readonly Dictionary<uint, long> _supervisorCallCounters = new();
     private readonly List<PowerPcNullProgramCounterRedirectEvent> _nullProgramCounterRedirectEvents = [];
     private readonly IPowerPcNullProgramCounterRedirectPolicy? _nullProgramCounterRedirectPolicy;
+    private readonly Dictionary<JitBlockKey, JitCompiledBlock> _jitCompiledBlocks = [];
+    private readonly Dictionary<JitBlockKey, int> _jitWarmupCounters = [];
+    private readonly HashSet<JitBlockKey> _jitRejectedBlocks = [];
+    private readonly Dictionary<uint, HashSet<JitBlockKey>> _jitBlocksByTranslatedCodePage = [];
     private uint _machineStateRegister;
     private ulong _timeBaseCounter;
     private AddressTranslationCache _instructionTranslationCache;
@@ -53,6 +63,47 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private bool _preserveHighBitOn8MbTranslation = true;
     private int _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
     private long _nullProgramCounterRedirectCount;
+    private int _jitBlockSequence;
+    private static readonly MethodInfo JitAdvanceTimeMethod =
+        GetRequiredInstanceMethod(nameof(JitAdvanceTime));
+    private static readonly MethodInfo JitAddImmediateMethod =
+        GetRequiredInstanceMethod(nameof(JitAddImmediate));
+    private static readonly MethodInfo JitCompareImmediateMethod =
+        GetRequiredInstanceMethod(nameof(JitCompareImmediate));
+    private static readonly MethodInfo JitOrImmediateMethod =
+        GetRequiredInstanceMethod(nameof(JitOrImmediate));
+    private static readonly MethodInfo JitExclusiveOrImmediateMethod =
+        GetRequiredInstanceMethod(nameof(JitExclusiveOrImmediate));
+    private static readonly MethodInfo JitAndImmediateMethod =
+        GetRequiredInstanceMethod(nameof(JitAndImmediate));
+    private static readonly MethodInfo JitLoadWordAndZeroMethod =
+        GetRequiredInstanceMethod(nameof(JitLoadWordAndZero));
+    private static readonly MethodInfo JitLoadByteAndZeroMethod =
+        GetRequiredInstanceMethod(nameof(JitLoadByteAndZero));
+    private static readonly MethodInfo JitStoreByteMethod =
+        GetRequiredInstanceMethod(nameof(JitStoreByte));
+    private static readonly MethodInfo JitAddRegisterMethod =
+        GetRequiredInstanceMethod(nameof(JitAddRegister));
+    private static readonly MethodInfo JitCompareWordMethod =
+        GetRequiredInstanceMethod(nameof(JitCompareWord));
+    private static readonly MethodInfo JitCompareLogicalWordMethod =
+        GetRequiredInstanceMethod(nameof(JitCompareLogicalWord));
+    private static readonly MethodInfo JitSubfcMethod =
+        GetRequiredInstanceMethod(nameof(JitSubfc));
+    private static readonly MethodInfo JitSubfeMethod =
+        GetRequiredInstanceMethod(nameof(JitSubfe));
+    private static readonly MethodInfo JitNandRegisterMethod =
+        GetRequiredInstanceMethod(nameof(JitNandRegister));
+    private static readonly MethodInfo JitAndRegisterMethod =
+        GetRequiredInstanceMethod(nameof(JitAndRegister));
+    private static readonly MethodInfo JitAndcRegisterMethod =
+        GetRequiredInstanceMethod(nameof(JitAndcRegister));
+    private static readonly MethodInfo JitOrRegisterMethod =
+        GetRequiredInstanceMethod(nameof(JitOrRegister));
+    private static readonly MethodInfo JitBranchConditionalMethod =
+        GetRequiredInstanceMethod(nameof(JitBranchConditional));
+    private static readonly MethodInfo JitBranchImmediateMethod =
+        GetRequiredInstanceMethod(nameof(JitBranchImmediate));
 
     public PowerPc32CpuCore()
         : this(
@@ -88,6 +139,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
         => _nullProgramCounterRedirectEvents;
 
     public bool NullProgramCounterRedirectEnabled { get; set; } = true;
+
+    public bool DynarecEnabled { get; set; } = true;
+
+    public int CompiledJitBlockCount => _jitCompiledBlocks.Count;
 
     public bool PreserveHighBitOn8MbTranslation
     {
@@ -268,6 +323,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         _instructionTranslationCache = default;
         _dataTranslationCache = default;
+        ClearJitCache();
     }
 
     private void BumpInstructionTlbGeneration()
@@ -278,6 +334,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         _instructionTranslationCache = default;
+        ClearJitCache();
     }
 
     private void BumpDataTlbGeneration()
@@ -433,11 +490,879 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         while (!Halted && executed < instructionBudget)
         {
+            var remainingBudget = instructionBudget - executed;
+
+            if (TryExecuteJitBlock(memoryBus, remainingBudget, out var jitExecuted))
+            {
+                executed += jitExecuted;
+                continue;
+            }
+
             ExecuteCycle(memoryBus);
             executed++;
         }
 
         return executed;
+    }
+
+    private bool TryExecuteJitBlock(IMemoryBus memoryBus, int remainingBudget, out int executed)
+    {
+        executed = 0;
+
+        if (!DynarecEnabled ||
+            remainingBudget <= 0 ||
+            _registers.Pc == 0)
+        {
+            return false;
+        }
+
+        var key = new JitBlockKey(
+            _registers.Pc,
+            _machineStateRegister,
+            _instructionTlbGeneration,
+            _preserveHighBitOn8MbTranslation);
+
+        if (_jitRejectedBlocks.Contains(key))
+        {
+            return false;
+        }
+
+        if (!_jitCompiledBlocks.TryGetValue(key, out var block))
+        {
+            if (_jitWarmupCounters.Count >= JitMaxWarmupEntries)
+            {
+                _jitWarmupCounters.Clear();
+            }
+
+            _jitWarmupCounters.TryGetValue(key, out var warmupHits);
+            warmupHits++;
+
+            if (warmupHits < JitCompileThreshold)
+            {
+                _jitWarmupCounters[key] = warmupHits;
+                return false;
+            }
+
+            _jitWarmupCounters.Remove(key);
+            var compiledBlock = CompileJitBlock(memoryBus, key);
+
+            if (!compiledBlock.HasValue)
+            {
+                _jitRejectedBlocks.Add(key);
+                return false;
+            }
+
+            block = compiledBlock.Value;
+            RegisterJitBlock(key, block);
+        }
+
+        executed = block.Executor(this, memoryBus, remainingBudget);
+
+        if (executed <= 0)
+        {
+            RemoveJitBlock(key);
+            return false;
+        }
+
+        return true;
+    }
+
+    private JitCompiledBlock? CompileJitBlock(IMemoryBus memoryBus, JitBlockKey key)
+    {
+        var method = new DynamicMethod(
+            name: $"ppc32_jit_{unchecked((int)key.ProgramCounter):X8}_{_jitBlockSequence++:X4}",
+            returnType: typeof(int),
+            parameterTypes: [typeof(PowerPc32CpuCore), typeof(IMemoryBus), typeof(int)],
+            owner: typeof(PowerPc32CpuCore),
+            skipVisibility: true);
+        var il = method.GetILGenerator();
+        var executedLocal = il.DeclareLocal(typeof(int));
+        il.Emit(OpCodes.Ldc_I4_0);
+        il.Emit(OpCodes.Stloc, executedLocal);
+
+        var pc = key.ProgramCounter;
+        var instructionCount = 0;
+        var translatedCodePages = new HashSet<uint>();
+
+        while (instructionCount < JitMaxInstructionsPerBlock)
+        {
+            uint translatedPc;
+            uint instructionWord;
+
+            try
+            {
+                translatedPc = TranslateInstructionAddress(pc);
+                instructionWord = memoryBus.ReadUInt32(translatedPc);
+            }
+            catch
+            {
+                break;
+            }
+
+            translatedCodePages.Add(translatedPc >> JitCodePageShift);
+            var instruction = new PowerPcInstruction(instructionWord);
+
+            if (!TryEmitJitInstruction(il, executedLocal, instruction, pc, out var terminatesBlock))
+            {
+                break;
+            }
+
+            instructionCount++;
+
+            if (terminatesBlock)
+            {
+                break;
+            }
+
+            pc = unchecked(pc + 4);
+        }
+
+        if (instructionCount == 0)
+        {
+            return null;
+        }
+
+        il.Emit(OpCodes.Ldloc, executedLocal);
+        il.Emit(OpCodes.Ret);
+
+        var executor = (JitBlockExecutor)method.CreateDelegate(typeof(JitBlockExecutor));
+        return new JitCompiledBlock(
+            executor,
+            instructionCount,
+            [.. translatedCodePages]);
+    }
+
+    private static bool TryEmitJitInstruction(
+        ILGenerator il,
+        LocalBuilder executedLocal,
+        PowerPcInstruction instruction,
+        uint currentPc,
+        out bool terminatesBlock)
+    {
+        terminatesBlock = false;
+
+        switch (instruction.Opcode)
+        {
+            case 11:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.ConditionRegisterField);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                il.Emit(OpCodes.Call, JitCompareImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 14:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, false);
+                il.Emit(OpCodes.Call, JitAddImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 15:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, true);
+                il.Emit(OpCodes.Call, JitAddImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 24:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Uimm);
+                EmitLoadBoolean(il, false);
+                il.Emit(OpCodes.Call, JitOrImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 25:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Uimm);
+                EmitLoadBoolean(il, true);
+                il.Emit(OpCodes.Call, JitOrImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 26:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Uimm);
+                EmitLoadBoolean(il, false);
+                il.Emit(OpCodes.Call, JitExclusiveOrImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 27:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Uimm);
+                EmitLoadBoolean(il, true);
+                il.Emit(OpCodes.Call, JitExclusiveOrImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 28:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Uimm);
+                EmitLoadBoolean(il, false);
+                il.Emit(OpCodes.Call, JitAndImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 29:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Uimm);
+                EmitLoadBoolean(il, true);
+                il.Emit(OpCodes.Call, JitAndImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 16:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, unchecked((int)currentPc));
+                EmitLoadInt32(il, instruction.BranchOptions);
+                EmitLoadInt32(il, instruction.BranchConditionBit);
+                EmitLoadInt32(il, instruction.BranchDisplacementConditional);
+                EmitLoadBoolean(il, instruction.AbsoluteAddress);
+                EmitLoadBoolean(il, instruction.Link);
+                il.Emit(OpCodes.Call, JitBranchConditionalMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                terminatesBlock = true;
+                return true;
+            case 18:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, unchecked((int)currentPc));
+                EmitLoadInt32(il, instruction.BranchDisplacementImmediate);
+                EmitLoadBoolean(il, instruction.AbsoluteAddress);
+                EmitLoadBoolean(il, instruction.Link);
+                il.Emit(OpCodes.Call, JitBranchImmediateMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                terminatesBlock = true;
+                return true;
+            case 32:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_1);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, false);
+                il.Emit(OpCodes.Call, JitLoadWordAndZeroMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 33:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_1);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, true);
+                il.Emit(OpCodes.Call, JitLoadWordAndZeroMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 34:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_1);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, false);
+                il.Emit(OpCodes.Call, JitLoadByteAndZeroMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 35:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_1);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, true);
+                il.Emit(OpCodes.Call, JitLoadByteAndZeroMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 38:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_1);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, false);
+                il.Emit(OpCodes.Call, JitStoreByteMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 39:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_1);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Simm);
+                EmitLoadBoolean(il, true);
+                il.Emit(OpCodes.Call, JitStoreByteMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 31:
+                return TryEmitJitXFormInstruction(il, executedLocal, instruction);
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryEmitJitXFormInstruction(
+        ILGenerator il,
+        LocalBuilder executedLocal,
+        PowerPcInstruction instruction)
+    {
+        switch (instruction.XO)
+        {
+            case 0: // cmpw
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.ConditionRegisterField);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rb);
+                il.Emit(OpCodes.Call, JitCompareWordMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 8: // subfc
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitSubfcMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 136: // subfe
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitSubfeMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 266: // add
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Rt);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitAddRegisterMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 28: // and
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitAndRegisterMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 32: // cmplw
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.ConditionRegisterField);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rb);
+                il.Emit(OpCodes.Call, JitCompareLogicalWordMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 60: // andc
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitAndcRegisterMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 444: // or
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitOrRegisterMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            case 476: // nand
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitNandRegisterMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static void EmitJitInstructionPrefix(ILGenerator il, LocalBuilder executedLocal)
+    {
+        var executeLabel = il.DefineLabel();
+
+        il.Emit(OpCodes.Ldloc, executedLocal);
+        il.Emit(OpCodes.Ldarg_2);
+        il.Emit(OpCodes.Blt_S, executeLabel);
+        il.Emit(OpCodes.Ldloc, executedLocal);
+        il.Emit(OpCodes.Ret);
+
+        il.MarkLabel(executeLabel);
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Call, JitAdvanceTimeMethod);
+    }
+
+    private static void EmitJitInstructionCountIncrement(ILGenerator il, LocalBuilder executedLocal)
+    {
+        il.Emit(OpCodes.Ldloc, executedLocal);
+        il.Emit(OpCodes.Ldc_I4_1);
+        il.Emit(OpCodes.Add);
+        il.Emit(OpCodes.Stloc, executedLocal);
+    }
+
+    private static void EmitLoadBoolean(ILGenerator il, bool value)
+    {
+        il.Emit(value ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
+    }
+
+    private static void EmitLoadInt32(ILGenerator il, int value)
+    {
+        switch (value)
+        {
+            case -1:
+                il.Emit(OpCodes.Ldc_I4_M1);
+                return;
+            case 0:
+                il.Emit(OpCodes.Ldc_I4_0);
+                return;
+            case 1:
+                il.Emit(OpCodes.Ldc_I4_1);
+                return;
+            case 2:
+                il.Emit(OpCodes.Ldc_I4_2);
+                return;
+            case 3:
+                il.Emit(OpCodes.Ldc_I4_3);
+                return;
+            case 4:
+                il.Emit(OpCodes.Ldc_I4_4);
+                return;
+            case 5:
+                il.Emit(OpCodes.Ldc_I4_5);
+                return;
+            case 6:
+                il.Emit(OpCodes.Ldc_I4_6);
+                return;
+            case 7:
+                il.Emit(OpCodes.Ldc_I4_7);
+                return;
+            case 8:
+                il.Emit(OpCodes.Ldc_I4_8);
+                return;
+        }
+
+        if (value is >= sbyte.MinValue and <= sbyte.MaxValue)
+        {
+            il.Emit(OpCodes.Ldc_I4_S, unchecked((sbyte)value));
+            return;
+        }
+
+        il.Emit(OpCodes.Ldc_I4, value);
+    }
+
+    private static MethodInfo GetRequiredInstanceMethod(string methodName)
+    {
+        return typeof(PowerPc32CpuCore).GetMethod(
+                   methodName,
+                   BindingFlags.Instance | BindingFlags.NonPublic) ??
+               throw new MissingMethodException(typeof(PowerPc32CpuCore).FullName, methodName);
+    }
+
+    private void RegisterJitBlock(JitBlockKey key, JitCompiledBlock block)
+    {
+        _jitCompiledBlocks[key] = block;
+        _jitRejectedBlocks.Remove(key);
+
+        foreach (var translatedCodePage in block.TranslatedCodePages)
+        {
+            if (!_jitBlocksByTranslatedCodePage.TryGetValue(translatedCodePage, out var keys))
+            {
+                keys = [];
+                _jitBlocksByTranslatedCodePage[translatedCodePage] = keys;
+            }
+
+            keys.Add(key);
+        }
+    }
+
+    private void RemoveJitBlock(JitBlockKey key)
+    {
+        if (!_jitCompiledBlocks.TryGetValue(key, out var block))
+        {
+            return;
+        }
+
+        _jitCompiledBlocks.Remove(key);
+        _jitWarmupCounters.Remove(key);
+        _jitRejectedBlocks.Remove(key);
+
+        foreach (var translatedCodePage in block.TranslatedCodePages)
+        {
+            if (!_jitBlocksByTranslatedCodePage.TryGetValue(translatedCodePage, out var keys))
+            {
+                continue;
+            }
+
+            keys.Remove(key);
+
+            if (keys.Count == 0)
+            {
+                _jitBlocksByTranslatedCodePage.Remove(translatedCodePage);
+            }
+        }
+    }
+
+    private void ClearJitCache()
+    {
+        _jitCompiledBlocks.Clear();
+        _jitWarmupCounters.Clear();
+        _jitRejectedBlocks.Clear();
+        _jitBlocksByTranslatedCodePage.Clear();
+    }
+
+    private void InvalidateJitForTranslatedWrite(uint translatedAddress, int accessSize)
+    {
+        if (_jitBlocksByTranslatedCodePage.Count == 0)
+        {
+            return;
+        }
+
+        var firstPage = translatedAddress >> JitCodePageShift;
+        var lastAddress = unchecked(translatedAddress + (uint)(Math.Max(accessSize, 1) - 1));
+        var lastPage = lastAddress >> JitCodePageShift;
+
+        for (var page = firstPage; page <= lastPage; page++)
+        {
+            InvalidateJitForTranslatedCodePage(page);
+
+            if (page == uint.MaxValue)
+            {
+                break;
+            }
+        }
+    }
+
+    private void InvalidateJitForTranslatedCodePage(uint translatedCodePage)
+    {
+        if (!_jitBlocksByTranslatedCodePage.TryGetValue(translatedCodePage, out var keys) ||
+            keys.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var key in keys.ToArray())
+        {
+            RemoveJitBlock(key);
+        }
+    }
+
+    private void JitAdvanceTime()
+    {
+        _timeBaseCounter++;
+        TickDecrementer();
+    }
+
+    private void JitAddImmediate(int rt, int ra, int simm, bool updateHigh)
+    {
+        var baseValue = ra == 0 ? 0u : _registers[ra];
+        var immediate = updateHigh
+            ? unchecked((uint)(simm << 16))
+            : unchecked((uint)simm);
+        var result = unchecked(baseValue + immediate);
+        _registers[rt] = result;
+        _registers.Pc += 4;
+    }
+
+    private void JitCompareImmediate(int conditionRegisterField, int ra, int simm)
+    {
+        var left = unchecked((int)_registers[ra]);
+        SetCrFieldForSignedCompare(conditionRegisterField, left, simm);
+        _registers.Pc += 4;
+    }
+
+    private void JitOrImmediate(int ra, int rs, int immediate, bool shifted)
+    {
+        var source = _registers[rs];
+        var operand = shifted
+            ? (uint)immediate << 16
+            : (uint)immediate;
+        _registers[ra] = source | operand;
+        _registers.Pc += 4;
+    }
+
+    private void JitExclusiveOrImmediate(int ra, int rs, int immediate, bool shifted)
+    {
+        var source = _registers[rs];
+        var operand = shifted
+            ? (uint)immediate << 16
+            : (uint)immediate;
+        _registers[ra] = source ^ operand;
+        _registers.Pc += 4;
+    }
+
+    private void JitAndImmediate(int ra, int rs, int immediate, bool shifted)
+    {
+        var source = _registers[rs];
+        var operand = shifted
+            ? (uint)immediate << 16
+            : (uint)immediate;
+        var result = source & operand;
+        _registers[ra] = result;
+        SetCr0FromResult(result);
+        _registers.Pc += 4;
+    }
+
+    private void JitLoadWordAndZero(
+        IMemoryBus memoryBus,
+        int rt,
+        int ra,
+        int simm,
+        bool updateBase)
+    {
+        var baseValue = ra == 0 ? 0u : _registers[ra];
+        var effectiveAddress = unchecked(baseValue + (uint)simm);
+        _registers[rt] = ReadDataUInt32(memoryBus, effectiveAddress);
+
+        if (updateBase && ra != 0)
+        {
+            _registers[ra] = effectiveAddress;
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitLoadByteAndZero(
+        IMemoryBus memoryBus,
+        int rt,
+        int ra,
+        int simm,
+        bool updateBase)
+    {
+        var baseValue = ra == 0 ? 0u : _registers[ra];
+        var effectiveAddress = unchecked(baseValue + (uint)simm);
+        _registers[rt] = ReadDataByte(memoryBus, effectiveAddress);
+
+        if (updateBase && ra != 0)
+        {
+            _registers[ra] = effectiveAddress;
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitStoreByte(
+        IMemoryBus memoryBus,
+        int rs,
+        int ra,
+        int simm,
+        bool updateBase)
+    {
+        var baseValue = ra == 0 ? 0u : _registers[ra];
+        var effectiveAddress = unchecked(baseValue + (uint)simm);
+        WriteDataByte(memoryBus, effectiveAddress, unchecked((byte)_registers[rs]));
+
+        if (updateBase && ra != 0)
+        {
+            _registers[ra] = effectiveAddress;
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitCompareWord(int conditionRegisterField, int ra, int rb)
+    {
+        SetCrFieldForSignedCompare(
+            conditionRegisterField,
+            unchecked((int)_registers[ra]),
+            unchecked((int)_registers[rb]));
+        _registers.Pc += 4;
+    }
+
+    private void JitCompareLogicalWord(int conditionRegisterField, int ra, int rb)
+    {
+        SetCrFieldForUnsignedCompare(
+            conditionRegisterField,
+            _registers[ra],
+            _registers[rb]);
+        _registers.Pc += 4;
+    }
+
+    private void JitAddRegister(int rt, int ra, int rb, bool recordCondition)
+    {
+        var result = unchecked(_registers[ra] + _registers[rb]);
+        _registers[rt] = result;
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitSubfc(int rt, int ra, int rb, bool recordCondition)
+    {
+        var left = _registers[ra];
+        var right = _registers[rb];
+        var result = unchecked(right - left);
+        _registers[rt] = result;
+        SetCarryFlag(right >= left);
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitSubfe(int rt, int ra, int rb, bool recordCondition)
+    {
+        var left = _registers[ra];
+        var right = _registers[rb];
+        var sum = (ulong)right + ~left + (GetCarryFlag() ? 1UL : 0UL);
+        var result = unchecked((uint)sum);
+        _registers[rt] = result;
+        SetCarryFlag((sum >> 32) != 0);
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitNandRegister(int ra, int rs, int rb, bool recordCondition)
+    {
+        var result = ~(_registers[rs] & _registers[rb]);
+        _registers[ra] = result;
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitAndRegister(int ra, int rs, int rb, bool recordCondition)
+    {
+        var result = _registers[rs] & _registers[rb];
+        _registers[ra] = result;
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitAndcRegister(int ra, int rs, int rb, bool recordCondition)
+    {
+        var result = _registers[rs] & ~_registers[rb];
+        _registers[ra] = result;
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitOrRegister(int ra, int rs, int rb, bool recordCondition)
+    {
+        var result = _registers[rs] | _registers[rb];
+        _registers[ra] = result;
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitBranchConditional(
+        uint currentPc,
+        int branchOptions,
+        int branchConditionBit,
+        int displacement,
+        bool absoluteAddress,
+        bool link)
+    {
+        var shouldBranch = EvaluateBranchCondition(branchOptions, branchConditionBit, allowCtrDecrement: true);
+
+        if (link)
+        {
+            _registers.Lr = currentPc + 4;
+        }
+
+        _registers.Pc = shouldBranch
+            ? (absoluteAddress
+                ? unchecked((uint)displacement)
+                : unchecked(currentPc + (uint)displacement))
+            : currentPc + 4;
+    }
+
+    private void JitBranchImmediate(
+        uint currentPc,
+        int displacement,
+        bool absoluteAddress,
+        bool link)
+    {
+        if (link)
+        {
+            _registers.Lr = currentPc + 4;
+        }
+
+        _registers.Pc = absoluteAddress
+            ? unchecked((uint)displacement)
+            : unchecked(currentPc + (uint)displacement);
     }
 
     private void ExecuteTrapDoublewordImmediate()
@@ -878,8 +1803,16 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
     private bool EvaluateBranchCondition(PowerPcInstruction instruction, bool allowCtrDecrement)
     {
-        var bo = instruction.BranchOptions;
-        var bi = instruction.BranchConditionBit;
+        return EvaluateBranchCondition(
+            instruction.BranchOptions,
+            instruction.BranchConditionBit,
+            allowCtrDecrement);
+    }
+
+    private bool EvaluateBranchCondition(int branchOptions, int branchConditionBit, bool allowCtrDecrement)
+    {
+        var bo = branchOptions;
+        var bi = branchConditionBit;
 
         var decrementCtr = allowCtrDecrement && (bo & 0x04) == 0;
         var checkConditionRegister = (bo & 0x10) == 0;
@@ -1901,6 +2834,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void WriteDataUInt32(IMemoryBus memoryBus, uint effectiveAddress, uint value)
     {
         var translatedAddress = TranslateDataAddress(effectiveAddress);
+        InvalidateJitForTranslatedWrite(translatedAddress, sizeof(uint));
         memoryBus.WriteUInt32(translatedAddress, value);
         var traceSink = MemoryAccessTraceSink;
 
@@ -1939,6 +2873,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void WriteDataByte(IMemoryBus memoryBus, uint effectiveAddress, byte value)
     {
         var translatedAddress = TranslateDataAddress(effectiveAddress);
+        InvalidateJitForTranslatedWrite(translatedAddress, sizeof(byte));
         memoryBus.WriteByte(translatedAddress, value);
         var traceSink = MemoryAccessTraceSink;
 
@@ -2182,6 +3117,22 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 entry.TableWalkControl);
         }
     }
+
+    private delegate int JitBlockExecutor(
+        PowerPc32CpuCore cpu,
+        IMemoryBus memoryBus,
+        int instructionBudget);
+
+    private readonly record struct JitBlockKey(
+        uint ProgramCounter,
+        uint MachineStateRegister,
+        uint InstructionTlbGeneration,
+        bool PreserveHighBitOn8MbTranslation);
+
+    private readonly record struct JitCompiledBlock(
+        JitBlockExecutor Executor,
+        int InstructionCount,
+        uint[] TranslatedCodePages);
 
     private readonly record struct AddressTranslationCache(
         bool IsValid,
