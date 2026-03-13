@@ -83,7 +83,8 @@ Arguments:
   - `--window 0x...:<before>:<after>`
   - `--progress-every <instructions>`
   - `--report-json /absolute/path/to/report.json`
-  - `--profile cisco-c2600-boot`
+  - `--profile cisco-c2600-boot` (fast baseline diagnostics)
+  - `--profile cisco-c2600-boot-watch` (deep watch32 diagnostics, higher runtime overhead)
   - `--checkpoint-file <path>` / `--checkpoint-force-rebuild`
   - `--svc-return-signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>=<value>`
 

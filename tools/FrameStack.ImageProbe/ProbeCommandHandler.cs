@@ -415,96 +415,122 @@ internal static class ProbeCommandHandler
 
             if (profileName.Equals("cisco-c2600-boot", StringComparison.OrdinalIgnoreCase))
             {
-                const uint baseGlobal = 0x82F40774;
+                ApplyCiscoC2600BootBaseProfile(
+                    additionalInstructionWindows,
+                    trackedProgramCounters,
+                    namedGlobalAddresses);
+                continue;
+            }
 
-                for (var index = 0; index <= 11; index++)
-                {
-                    AddDistinct(watchWordAddresses, unchecked(baseGlobal + (uint)(index * 4)));
-                }
-
-                for (var offset = 0x774; offset <= 0x7A0; offset += 4)
-                {
-                    AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(9, offset));
-                }
-
-                AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(10, 0x77C));
-                AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(10, 0x780));
-
-                var descriptorWatchAddresses = new uint[]
-                {
-                    0x82F406A8,
-                    0x82F406AC,
-                    0x82F406B0,
-                    0x82F406B4,
-                    0x82F406B8,
-                    0x82F406BC,
-                    0x82F406C0,
-                    0x82F406C4,
-                    0x82F406C8,
-                    0x82F406CC,
-                };
-
-                foreach (var address in descriptorWatchAddresses)
-                {
-                    AddDistinct(watchWordAddresses, address);
-                }
-
-                var trackedPcs = new uint[]
-                {
-                    0x816E2928,
-                    0x816E292C,
-                    0x816E29BC,
-                    0x816E2DD4,
-                    0x816E2F70,
-                };
-
-                foreach (var trackedPc in trackedPcs)
-                {
-                    AddDistinct(trackedProgramCounters, trackedPc);
-                }
-
-                AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2928, 12, 12));
-                AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E29BC, 8, 8));
-                AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2DD4, 8, 8));
-
-                var c2600Globals = new NamedAddress[]
-                {
-                    new("g_0x8000BCEC", 0x8000BCEC),
-                    new("g_0x8000BCF0", 0x8000BCF0),
-                    new("g_0x8000BCF4", 0x8000BCF4),
-                    new("g_0x8000BCF8", 0x8000BCF8),
-                    new("g_0x8000BCFC", 0x8000BCFC),
-                    new("g_0x8000BD00", 0x8000BD00),
-                    new("g_0x8000BD04", 0x8000BD04),
-                    new("g_0x8000BD4C", 0x8000BD4C),
-                    new("g_0x8000BD50", 0x8000BD50),
-                    new("g_0x8000BD54", 0x8000BD54),
-                    new("g_0x80090780", 0x80090780),
-                    new("g_0x80090784", 0x80090784),
-                    new("g_0x82F40774", 0x82F40774),
-                    new("g_0x82F40778", 0x82F40778),
-                    new("g_0x82F4077C", 0x82F4077C),
-                    new("g_0x82F40780", 0x82F40780),
-                    new("g_0x82F40784", 0x82F40784),
-                    new("g_0x82F40788", 0x82F40788),
-                    new("g_0x82F4078C", 0x82F4078C),
-                    new("g_0x82F40790", 0x82F40790),
-                    new("g_0x82F40794", 0x82F40794),
-                    new("g_0x82F40798", 0x82F40798),
-                    new("g_0x82F4079C", 0x82F4079C),
-                    new("g_0x82F407A0", 0x82F407A0),
-                };
-
-                foreach (var global in c2600Globals)
-                {
-                    AddDistinct(namedGlobalAddresses, global);
-                }
+            if (profileName.Equals("cisco-c2600-boot-watch", StringComparison.OrdinalIgnoreCase))
+            {
+                ApplyCiscoC2600BootBaseProfile(
+                    additionalInstructionWindows,
+                    trackedProgramCounters,
+                    namedGlobalAddresses);
+                ApplyCiscoC2600BootWatchProfile(watchWordAddresses, dynamicWatchWordRequests);
 
                 continue;
             }
 
             throw new ArgumentException(
-                $"Unsupported profile '{profileNameRaw}'. Supported profiles: cisco-c2600-boot.");
+                $"Unsupported profile '{profileNameRaw}'. Supported profiles: cisco-c2600-boot, cisco-c2600-boot-watch.");
+        }
+    }
+
+    private static void ApplyCiscoC2600BootBaseProfile(
+        IList<InstructionWindowRequest> additionalInstructionWindows,
+        IList<uint> trackedProgramCounters,
+        IList<NamedAddress> namedGlobalAddresses)
+    {
+        var trackedPcs = new uint[]
+        {
+            0x816E2928,
+            0x816E292C,
+            0x816E29BC,
+            0x816E2DD4,
+            0x816E2F70,
+        };
+
+        foreach (var trackedPc in trackedPcs)
+        {
+            AddDistinct(trackedProgramCounters, trackedPc);
+        }
+
+        AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2928, 12, 12));
+        AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E29BC, 8, 8));
+        AddDistinct(additionalInstructionWindows, new InstructionWindowRequest(0x816E2DD4, 8, 8));
+
+        var c2600Globals = new NamedAddress[]
+        {
+            new("g_0x8000BCEC", 0x8000BCEC),
+            new("g_0x8000BCF0", 0x8000BCF0),
+            new("g_0x8000BCF4", 0x8000BCF4),
+            new("g_0x8000BCF8", 0x8000BCF8),
+            new("g_0x8000BCFC", 0x8000BCFC),
+            new("g_0x8000BD00", 0x8000BD00),
+            new("g_0x8000BD04", 0x8000BD04),
+            new("g_0x8000BD4C", 0x8000BD4C),
+            new("g_0x8000BD50", 0x8000BD50),
+            new("g_0x8000BD54", 0x8000BD54),
+            new("g_0x80090780", 0x80090780),
+            new("g_0x80090784", 0x80090784),
+            new("g_0x82F40774", 0x82F40774),
+            new("g_0x82F40778", 0x82F40778),
+            new("g_0x82F4077C", 0x82F4077C),
+            new("g_0x82F40780", 0x82F40780),
+            new("g_0x82F40784", 0x82F40784),
+            new("g_0x82F40788", 0x82F40788),
+            new("g_0x82F4078C", 0x82F4078C),
+            new("g_0x82F40790", 0x82F40790),
+            new("g_0x82F40794", 0x82F40794),
+            new("g_0x82F40798", 0x82F40798),
+            new("g_0x82F4079C", 0x82F4079C),
+            new("g_0x82F407A0", 0x82F407A0),
+        };
+
+        foreach (var global in c2600Globals)
+        {
+            AddDistinct(namedGlobalAddresses, global);
+        }
+    }
+
+    private static void ApplyCiscoC2600BootWatchProfile(
+        IList<uint> watchWordAddresses,
+        IList<DynamicWatchWordRequest> dynamicWatchWordRequests)
+    {
+        const uint baseGlobal = 0x82F40774;
+
+        for (var index = 0; index <= 11; index++)
+        {
+            AddDistinct(watchWordAddresses, unchecked(baseGlobal + (uint)(index * 4)));
+        }
+
+        for (var offset = 0x774; offset <= 0x7A0; offset += 4)
+        {
+            AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(9, offset));
+        }
+
+        AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(10, 0x77C));
+        AddDistinct(dynamicWatchWordRequests, new DynamicWatchWordRequest(10, 0x780));
+
+        var descriptorWatchAddresses = new uint[]
+        {
+            0x82F406A8,
+            0x82F406AC,
+            0x82F406B0,
+            0x82F406B4,
+            0x82F406B8,
+            0x82F406BC,
+            0x82F406C0,
+            0x82F406C4,
+            0x82F406C8,
+            0x82F406CC,
+        };
+
+        foreach (var address in descriptorWatchAddresses)
+        {
+            AddDistinct(watchWordAddresses, address);
         }
     }
 
