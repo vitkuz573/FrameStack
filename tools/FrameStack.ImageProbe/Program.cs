@@ -1811,15 +1811,15 @@ static TracedRunResult RunBudgetWithTrace(
             }
         }
 
-        if (chunkExecuted == 0)
-        {
-            break;
-        }
-
         if (traceSummary.StopReason != ExecutionStopReason.InstructionBudgetReached &&
             traceSummary.StopReason != ExecutionStopReason.None)
         {
             stopReason = traceSummary.StopReason;
+            break;
+        }
+
+        if (chunkExecuted == 0)
+        {
             break;
         }
     }
@@ -1829,6 +1829,17 @@ static TracedRunResult RunBudgetWithTrace(
         if (machine.Halted)
         {
             stopReason = ExecutionStopReason.Halted;
+        }
+        else if (stopAtProgramCounter.HasValue &&
+                 machine.ProgramCounter == stopAtProgramCounter.Value)
+        {
+            stopReason = ExecutionStopReason.StopAtProgramCounter;
+        }
+        else if (stopAtProgramCounterHits.TryGetValue(machine.ProgramCounter, out var requiredHits) &&
+                 trackedProgramCounterHits.TryGetValue(machine.ProgramCounter, out var hitCount) &&
+                 hitCount >= requiredHits)
+        {
+            stopReason = ExecutionStopReason.StopAtProgramCounterHit;
         }
         else if (remaining <= 0)
         {
