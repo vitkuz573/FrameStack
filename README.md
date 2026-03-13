@@ -121,7 +121,7 @@ dotnet run --project tools/FrameStack.ImageProbe -- /path/to/cisco.bin \
 Run an image in a continuous execution loop with live console output (without probe traces):
 
 ```bash
-dotnet run --project tools/FrameStack.Runner -- /absolute/path/to/image.bin \
+dotnet run -c Release --project tools/FrameStack.Runner -- /absolute/path/to/image.bin \
   --memory-mb 256
 ```
 
@@ -131,6 +131,7 @@ Options:
 - `--memory-mb` (optional, default `256`)
 
 `Runner` streams IOS console output and runs until firmware halts or you stop it with `Ctrl+C`.
+Use `-c Release` for performance; Debug build is significantly slower.
 
 ## Main API
 

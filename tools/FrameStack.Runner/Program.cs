@@ -34,6 +34,11 @@ Console.WriteLine($"Segments: {inspection.Sections.Count}");
 Console.WriteLine($"Summary: {inspection.Summary}");
 Console.WriteLine($"MemoryMb: {invocation.MemoryMb}");
 Console.WriteLine("Press Ctrl+C to stop execution.");
+#if DEBUG
+Console.WriteLine("BuildConfiguration: Debug (slow). Use '-c Release' for maximum speed.");
+#else
+Console.WriteLine("BuildConfiguration: Release");
+#endif
 
 var bootstrapper = new RuntimeImageBootstrapper(
     analyzer,
