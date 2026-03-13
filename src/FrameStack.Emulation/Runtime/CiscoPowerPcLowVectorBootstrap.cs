@@ -7,8 +7,8 @@ public static class CiscoPowerPcLowVectorBootstrap
 {
     private const uint LisR0OpcodeBase = 0x3C00_0000;
     private const uint OriR0OpcodeBase = 0x6000_0000;
-    private const uint MoveR0ToLinkRegister = 0x7C08_03A6;
-    private const uint BranchToLinkRegister = 0x4E80_0020;
+    private const uint MoveR0ToCounterRegister = 0x7C09_03A6;
+    private const uint BranchToCounterRegister = 0x4E80_0420;
 
     public static bool TryInstallEntryStub(
         IMemoryBus memoryBus,
@@ -34,8 +34,8 @@ public static class CiscoPowerPcLowVectorBootstrap
 
         memoryBus.WriteUInt32(0x0000_0000, LisR0OpcodeBase | entryUpper);
         memoryBus.WriteUInt32(0x0000_0004, OriR0OpcodeBase | entryLower);
-        memoryBus.WriteUInt32(0x0000_0008, MoveR0ToLinkRegister);
-        memoryBus.WriteUInt32(0x0000_000C, BranchToLinkRegister);
+        memoryBus.WriteUInt32(0x0000_0008, MoveR0ToCounterRegister);
+        memoryBus.WriteUInt32(0x0000_000C, BranchToCounterRegister);
 
         return true;
     }

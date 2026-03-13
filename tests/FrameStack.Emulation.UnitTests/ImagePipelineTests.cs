@@ -270,8 +270,8 @@ public sealed class ImagePipelineTests
         Assert.False(powerPc.NullProgramCounterRedirectEnabled);
         Assert.Equal(0x3C008000u, state.Machine.ReadUInt32(0x00000000));
         Assert.Equal(0x60008000u, state.Machine.ReadUInt32(0x00000004));
-        Assert.Equal(0x7C0803A6u, state.Machine.ReadUInt32(0x00000008));
-        Assert.Equal(0x4E800020u, state.Machine.ReadUInt32(0x0000000C));
+        Assert.Equal(0x7C0903A6u, state.Machine.ReadUInt32(0x00000008));
+        Assert.Equal(0x4E800420u, state.Machine.ReadUInt32(0x0000000C));
 
         var summary = state.Machine.Run(instructionBudget: 4);
 
