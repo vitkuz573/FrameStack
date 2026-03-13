@@ -9,6 +9,7 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
 
     private readonly IPowerPcSupervisorCallHandler _innerHandler;
     private readonly int _maxTraceEntries;
+    private readonly bool _captureConsoleOutput;
     private readonly Dictionary<uint, long> _serviceCounters = new();
     private readonly Dictionary<PowerPcSupervisorSubcallKey, long> _subserviceCounters = new();
     private readonly StringBuilder _consoleOutput = new();
@@ -16,7 +17,8 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
 
     public PowerPcTracingSupervisorCallHandler(
         IPowerPcSupervisorCallHandler innerHandler,
-        int maxTraceEntries = 4096)
+        int maxTraceEntries = 4096,
+        bool captureConsoleOutput = true)
     {
         _innerHandler = innerHandler
             ?? throw new ArgumentNullException(nameof(innerHandler));
@@ -25,6 +27,7 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
             : throw new ArgumentOutOfRangeException(
                 nameof(maxTraceEntries),
                 "Maximum trace entries must be non-negative.");
+        _captureConsoleOutput = captureConsoleOutput;
     }
 
     public IReadOnlyDictionary<uint, long> ServiceCounters => _serviceCounters;
@@ -33,7 +36,11 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
 
     public IReadOnlyList<PowerPcSupervisorCallTraceEntry> CallTrace => _callTrace;
 
-    public string ConsoleOutput => _consoleOutput.ToString();
+    public string ConsoleOutput => _captureConsoleOutput
+        ? _consoleOutput.ToString()
+        : string.Empty;
+
+    public Action<char>? ConsoleCharacterSink { get; set; }
 
     public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
     {
@@ -109,18 +116,33 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
 
     private void AppendConsoleCharacter(byte value)
     {
+        char? character = null;
+
         switch (value)
         {
             case (byte)'\r':
             case (byte)'\n':
             case (byte)'\t':
-                _consoleOutput.Append((char)value);
-                return;
+                character = (char)value;
+                break;
         }
 
-        if (value is >= 0x20 and <= 0x7E)
+        if (!character.HasValue &&
+            value is >= 0x20 and <= 0x7E)
         {
-            _consoleOutput.Append((char)value);
+            character = (char)value;
         }
+
+        if (!character.HasValue)
+        {
+            return;
+        }
+
+        if (_captureConsoleOutput)
+        {
+            _consoleOutput.Append(character.Value);
+        }
+
+        ConsoleCharacterSink?.Invoke(character.Value);
     }
 }

@@ -3,7 +3,8 @@ using FrameStack.Emulation.Images;
 using FrameStack.Emulation.PowerPc32;
 using FrameStack.Emulation.Runtime;
 
-const int RuntimeChunkBudget = 500_000;
+const int FastChunkBudget = 20_000_000;
+const int DebugChunkBudget = 500_000;
 const int ConsoleTraceMaxEvents = 0;
 const double StatusIntervalSeconds = 2.0;
 
@@ -34,6 +35,7 @@ Console.WriteLine($"Segments: {inspection.Sections.Count}");
 Console.WriteLine($"Summary: {inspection.Summary}");
 Console.WriteLine($"MemoryMb: {invocation.MemoryMb}");
 Console.WriteLine("Press Ctrl+C to stop execution.");
+Console.WriteLine($"RunnerDebug: {invocation.RunnerDebug}");
 #if DEBUG
 Console.WriteLine("BuildConfiguration: Debug (slow). Use '-c Release' for maximum speed.");
 #else
@@ -58,7 +60,11 @@ try
     {
         supervisorTracer = new PowerPcTracingSupervisorCallHandler(
             powerPcCore.SupervisorCallHandler,
-            ConsoleTraceMaxEvents);
+            ConsoleTraceMaxEvents,
+            captureConsoleOutput: false)
+        {
+            ConsoleCharacterSink = static character => Console.Write(character),
+        };
         powerPcCore.SupervisorCallHandler = supervisorTracer;
     }
 
@@ -70,23 +76,24 @@ try
     };
 
     var executed = 0L;
-    var consoleEmittedLength = 0;
     var runStopwatch = Stopwatch.StartNew();
     var statusStopwatch = Stopwatch.StartNew();
+    var chunkBudget = invocation.RunnerDebug
+        ? DebugChunkBudget
+        : FastChunkBudget;
     var stopReason = "Halted";
 
     while (!state.Machine.Halted && !cancellationRequested)
     {
-        var summary = state.Machine.Run(RuntimeChunkBudget);
+        var summary = state.Machine.Run(chunkBudget);
 
         if (summary.ExecutedInstructions > 0)
         {
             executed += summary.ExecutedInstructions;
         }
 
-        EmitConsoleDelta(supervisorTracer, ref consoleEmittedLength);
-
-        if (statusStopwatch.Elapsed.TotalSeconds >= StatusIntervalSeconds)
+        if (invocation.RunnerDebug &&
+            statusStopwatch.Elapsed.TotalSeconds >= StatusIntervalSeconds)
         {
             var ips = runStopwatch.Elapsed.TotalSeconds > 0
                 ? executed / runStopwatch.Elapsed.TotalSeconds
@@ -114,7 +121,6 @@ try
     }
 
     runStopwatch.Stop();
-    EmitConsoleDelta(supervisorTracer, ref consoleEmittedLength);
 
     Console.WriteLine();
     Console.WriteLine("Run Summary:");
@@ -169,25 +175,4 @@ catch (Exception exception)
     }
 
     return 3;
-}
-
-static void EmitConsoleDelta(
-    PowerPcTracingSupervisorCallHandler? supervisorTracer,
-    ref int emittedLength)
-{
-    if (supervisorTracer is null)
-    {
-        return;
-    }
-
-    var output = supervisorTracer.ConsoleOutput;
-
-    if (output.Length <= emittedLength)
-    {
-        return;
-    }
-
-    var delta = output.AsSpan(emittedLength).ToString();
-    Console.Write(delta);
-    emittedLength = output.Length;
 }

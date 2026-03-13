@@ -7,4 +7,9 @@ internal static class CliOptions
         Description = "Emulated RAM size in megabytes.",
         DefaultValueFactory = _ => 256,
     };
+
+    internal static readonly Option<bool> RunnerDebug = new("--runner-debug")
+    {
+        Description = "Enable runner diagnostic status output.",
+    };
 }

@@ -129,6 +129,7 @@ Options:
 
 - `image-path`
 - `--memory-mb` (optional, default `256`)
+- `--runner-debug` (optional; enables runner status lines like `[runner] ...`)
 
 `Runner` streams IOS console output and runs until firmware halts or you stop it with `Ctrl+C`.
 Use `-c Release` for performance; Debug build is significantly slower.

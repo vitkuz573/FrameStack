@@ -3,7 +3,8 @@ using System.CommandLine.Parsing;
 
 internal sealed record RunCliInvocation(
     string ImagePath,
-    int MemoryMb);
+    int MemoryMb,
+    bool RunnerDebug);
 
 internal static class RunCommandHandler
 {
@@ -72,6 +73,7 @@ internal static class RunCommandHandler
         var command = new RootCommand("FrameStack runtime image runner");
         command.Arguments.Add(CliArguments.ImagePath);
         command.Options.Add(CliOptions.MemoryMb);
+        command.Options.Add(CliOptions.RunnerDebug);
         return command;
     }
 
@@ -88,6 +90,7 @@ internal static class RunCommandHandler
 
         return new RunCliInvocation(
             imagePath,
-            memoryMb);
+            memoryMb,
+            parseResult.GetValue(CliOptions.RunnerDebug));
     }
 }
