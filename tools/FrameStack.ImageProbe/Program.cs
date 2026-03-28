@@ -275,13 +275,21 @@ else
 var bootstrapper = new RuntimeImageBootstrapper(
     analyzer,
     [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+var uartConsoleOutput = new StringBuilder();
 
 try
 {
     var state = bootstrapper.Bootstrap(
         runtimeHandle: "probe",
         imageBytes,
-        memoryMb);
+        memoryMb,
+        consoleTransmitSink: value =>
+        {
+            if (TryDecodeConsoleCharacter(value, out var character))
+            {
+                uartConsoleOutput.Append(character);
+            }
+        });
 
     long baseExecutedInstructions = 0;
 
@@ -492,13 +500,14 @@ try
         cliOptions.ProgressEveryInstructions,
         () =>
         {
-            if (supervisorTracer is null ||
-                cliOptions.StopOnConsoleRepeatRules.Count == 0)
+            if (cliOptions.StopOnConsoleRepeatRules.Count == 0)
             {
                 return null;
             }
 
-            var consoleOutput = supervisorTracer.ConsoleOutput;
+            var consoleOutput = BuildCombinedConsoleOutput(
+                supervisorTracer?.ConsoleOutput ?? string.Empty,
+                uartConsoleOutput.ToString());
 
             foreach (var rule in cliOptions.StopOnConsoleRepeatRules)
             {
@@ -546,6 +555,9 @@ try
     var supervisorCallCountersDelta = ComputeCounterDelta(
         supervisorCallCountersBaseline,
         supervisorCallCountersTotal);
+    var combinedConsoleOutput = BuildCombinedConsoleOutput(
+        supervisorTracer?.ConsoleOutput ?? string.Empty,
+        uartConsoleOutput.ToString());
 
     Console.WriteLine();
     Console.WriteLine("Preflight Run:");
@@ -923,11 +935,10 @@ if (powerPcCore is not null)
         }
     }
 
-    if (supervisorTracer is not null &&
-        supervisorTracer.ConsoleOutput.Length > 0)
+    if (!string.IsNullOrEmpty(combinedConsoleOutput))
     {
         Console.WriteLine("ConsoleOutput:");
-        Console.WriteLine(supervisorTracer.ConsoleOutput);
+        Console.WriteLine(combinedConsoleOutput);
     }
 
     if (cliOptions.ReportJsonPath is not null)
@@ -960,7 +971,7 @@ if (powerPcCore is not null)
             supervisorCallCountersTotal,
             supervisorCallCountersDelta,
             supervisorTracer?.CallTrace ?? Array.Empty<PowerPcSupervisorCallTraceEntry>(),
-            supervisorTracer?.ConsoleOutput ?? string.Empty);
+            combinedConsoleOutput);
         SaveProbeReport(cliOptions.ReportJsonPath, probeReport);
         Console.WriteLine($"ReportJsonSaved: {cliOptions.ReportJsonPath}");
     }
@@ -1207,6 +1218,51 @@ static long CountSubstringOccurrences(string source, string needle)
     }
 
     return hits;
+}
+
+static string BuildCombinedConsoleOutput(string monitorOutput, string uartOutput)
+{
+    var hasMonitorOutput = !string.IsNullOrEmpty(monitorOutput);
+    var hasUartOutput = !string.IsNullOrEmpty(uartOutput);
+
+    if (!hasMonitorOutput &&
+        !hasUartOutput)
+    {
+        return string.Empty;
+    }
+
+    if (!hasMonitorOutput)
+    {
+        return uartOutput;
+    }
+
+    if (!hasUartOutput)
+    {
+        return monitorOutput;
+    }
+
+    return string.Concat(monitorOutput, uartOutput);
+}
+
+static bool TryDecodeConsoleCharacter(byte value, out char character)
+{
+    switch (value)
+    {
+        case (byte)'\r':
+        case (byte)'\n':
+        case (byte)'\t':
+            character = (char)value;
+            return true;
+    }
+
+    if (value is >= 0x20 and <= 0x7E)
+    {
+        character = (char)value;
+        return true;
+    }
+
+    character = default;
+    return false;
 }
 
 static bool IsProgramCounterInRanges(uint programCounter, IReadOnlyList<AddressRange> ranges)

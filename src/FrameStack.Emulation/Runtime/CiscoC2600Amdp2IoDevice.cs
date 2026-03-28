@@ -12,6 +12,18 @@ public sealed class CiscoC2600Amdp2IoDevice : IMemoryMappedDevice
     private const uint PresenceStatusOffset = 0x0001_00F0;
     private const uint DefaultAmdp2DeviceId = 0x2000_1022;
     private const uint DefaultPresenceStatusMask = 0x4000_0000;
+    private const uint ControlStatusRegister0 = 0x0000_0000;
+    private const uint Csr0InitBit = 0x0000_0001;
+    private const uint Csr0StartBit = 0x0000_0002;
+    private const uint Csr0StopBit = 0x0000_0004;
+    private const uint Csr0TxOnBit = 0x0000_0010;
+    private const uint Csr0RxOnBit = 0x0000_0020;
+    private const uint Csr0InterruptEnableBit = 0x0000_0040;
+    private const uint Csr0InitDoneBit = 0x0000_0100;
+    private const uint Csr0WritableMask = Csr0InitBit |
+                                          Csr0StartBit |
+                                          Csr0StopBit |
+                                          Csr0InterruptEnableBit;
 
     private readonly byte[] _registerWindow;
     private readonly Dictionary<uint, uint> _adapterRegisterBank = new();
@@ -70,7 +82,8 @@ public sealed class CiscoC2600Amdp2IoDevice : IMemoryMappedDevice
 
         if (IsWordRegisterByte(offset, AdapterDataOffset))
         {
-            _adapterRegisterBank[_adapterCommand] = LoadUInt32(AdapterDataOffset);
+            var writeValue = LoadUInt32(AdapterDataOffset);
+            _adapterRegisterBank[_adapterCommand] = ResolveAdapterDataWriteValue(_adapterCommand, writeValue);
             return;
         }
 
@@ -129,7 +142,7 @@ public sealed class CiscoC2600Amdp2IoDevice : IMemoryMappedDevice
 
         if (offset == AdapterDataOffset)
         {
-            _adapterRegisterBank[_adapterCommand] = value;
+            _adapterRegisterBank[_adapterCommand] = ResolveAdapterDataWriteValue(_adapterCommand, value);
             StoreUInt32(offset, value);
             return;
         }
@@ -195,5 +208,45 @@ public sealed class CiscoC2600Amdp2IoDevice : IMemoryMappedDevice
         return _adapterRegisterBank.TryGetValue(_adapterCommand, out var value)
             ? value
             : 0u;
+    }
+
+    private uint ResolveAdapterDataWriteValue(uint command, uint value)
+    {
+        if (command != ControlStatusRegister0)
+        {
+            return value;
+        }
+
+        var existing = _adapterRegisterBank.TryGetValue(ControlStatusRegister0, out var stored)
+            ? stored
+            : DefaultAmdp2DeviceId;
+        var highHalf = existing & 0xFFFF_0000u;
+        var lowHalf = ResolveControlStatusRegister0Write(value);
+
+        return highHalf | lowHalf;
+    }
+
+    private static uint ResolveControlStatusRegister0Write(uint value)
+    {
+        var writable = value & Csr0WritableMask;
+
+        if ((writable & Csr0StopBit) != 0)
+        {
+            // STOP request forces controller into reset-like state.
+            return Csr0StopBit;
+        }
+
+        if ((writable & Csr0StartBit) != 0)
+        {
+            // Firmware expects START to transition RX/TX online.
+            writable |= Csr0RxOnBit | Csr0TxOnBit | Csr0InitDoneBit;
+        }
+        else if ((writable & Csr0InitBit) != 0)
+        {
+            // Minimal INIT emulation: complete initialization immediately.
+            writable |= Csr0InitDoneBit;
+        }
+
+        return writable;
     }
 }
