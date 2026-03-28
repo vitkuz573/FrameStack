@@ -75,6 +75,11 @@ internal static class CliOptions
         "--stop-on-console-repeat",
         "Console repeat stop rule <text>=<count>.");
 
+    internal static readonly Option<bool> AutoConsoleScript = new("--auto-console-script")
+    {
+        Description = "Inject deterministic C2600 console responses for common boot prompts.",
+    };
+
     internal static readonly Option<string[]> ProfileNames = CreateManyValueOption(
         "--profile",
         "Probe profile name.");

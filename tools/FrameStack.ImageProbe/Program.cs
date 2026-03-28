@@ -257,6 +257,11 @@ if (cliOptions.StopOnConsoleRepeatRules.Count > 0)
         $"StopOnConsoleRepeat: {string.Join(", ", cliOptions.StopOnConsoleRepeatRules.Select(rule => $"'{rule.Text}'={rule.RequiredHits}"))}");
 }
 
+if (cliOptions.AutoConsoleScript)
+{
+    Console.WriteLine("AutoConsoleScript: True");
+}
+
 if (cliOptions.CheckpointFilePath is not null)
 {
     Console.WriteLine($"CheckpointFile: {cliOptions.CheckpointFilePath}");
@@ -509,6 +514,15 @@ try
         .Distinct()
         .ToDictionary(address => address, _ => 0L);
     var runStopwatch = Stopwatch.StartNew();
+    var ciscoAutoPromptReturnResponses = 0L;
+    var ciscoAutoPromptConfigResponses = 0L;
+    var ciscoAutoIdleResponses = 0L;
+    var ciscoAutoLastConsoleLength = 0;
+    var ciscoAutoLastProgramCounter = state.Machine.ProgramCounter;
+    var ciscoAutoIdleConsoleChunks = 0;
+    var ciscoAutoStagnantPcChunks = 0;
+    var enableAutoConsoleIdleAssist = cliOptions.AutoConsoleScript &&
+                                      cliOptions.TraceInstructionProgramCounterRanges.Count == 0;
     var traceRun = RunBudgetWithTrace(
         state.Machine,
         remainingBudget,
@@ -536,7 +550,8 @@ try
         cliOptions.ProgressEveryInstructions,
         () =>
         {
-            if (cliOptions.StopOnConsoleRepeatRules.Count == 0)
+            if (!cliOptions.AutoConsoleScript &&
+                cliOptions.StopOnConsoleRepeatRules.Count == 0)
             {
                 return null;
             }
@@ -544,6 +559,26 @@ try
             var consoleOutput = BuildCombinedConsoleOutput(
                 supervisorTracer?.ConsoleOutput ?? string.Empty,
                 uartConsoleOutput.ToString());
+
+            if (cliOptions.AutoConsoleScript)
+            {
+                ApplyCiscoAutoConsoleScript(
+                    state,
+                    consoleOutput,
+                    enableAutoConsoleIdleAssist,
+                    ref ciscoAutoPromptReturnResponses,
+                    ref ciscoAutoPromptConfigResponses,
+                    ref ciscoAutoIdleResponses,
+                    ref ciscoAutoLastConsoleLength,
+                    ref ciscoAutoLastProgramCounter,
+                    ref ciscoAutoIdleConsoleChunks,
+                    ref ciscoAutoStagnantPcChunks);
+            }
+
+            if (cliOptions.StopOnConsoleRepeatRules.Count == 0)
+            {
+                return null;
+            }
 
             foreach (var rule in cliOptions.StopOnConsoleRepeatRules)
             {
@@ -594,6 +629,12 @@ try
     var combinedConsoleOutput = BuildCombinedConsoleOutput(
         supervisorTracer?.ConsoleOutput ?? string.Empty,
         uartConsoleOutput.ToString());
+
+    if (cliOptions.AutoConsoleScript)
+    {
+        Console.WriteLine(
+            $"AutoConsoleResponses: press-return={ciscoAutoPromptReturnResponses} config-no={ciscoAutoPromptConfigResponses} idle-cr={ciscoAutoIdleResponses}");
+    }
 
     Console.WriteLine();
     Console.WriteLine("Preflight Run:");
@@ -1267,6 +1308,83 @@ static long CountSubstringOccurrences(string source, string needle)
     }
 
     return hits;
+}
+
+static void ApplyCiscoAutoConsoleScript(
+    RuntimeSessionState state,
+    string consoleOutput,
+    bool enableIdleAssist,
+    ref long pressReturnResponses,
+    ref long configDialogResponses,
+    ref long idleResponses,
+    ref int lastConsoleLength,
+    ref uint lastProgramCounter,
+    ref int idleConsoleChunks,
+    ref int stagnantProgramCounterChunks)
+{
+    if (state.CiscoC2600ConsoleUartDevice is null)
+    {
+        return;
+    }
+
+    const string PressReturnPrompt = "Press RETURN to get started!";
+    const string ConfigDialogPrompt = "initial configuration dialog? [yes/no]:";
+    var pressReturnHits = CountSubstringOccurrences(consoleOutput, PressReturnPrompt);
+
+    while (pressReturnResponses < pressReturnHits)
+    {
+        state.CiscoC2600ConsoleUartDevice.EnqueueReceiveByte((byte)'\r');
+        pressReturnResponses++;
+    }
+
+    var configDialogHits = CountSubstringOccurrences(consoleOutput, ConfigDialogPrompt);
+
+    while (configDialogResponses < configDialogHits)
+    {
+        state.CiscoC2600ConsoleUartDevice.EnqueueReceiveByte((byte)'n');
+        state.CiscoC2600ConsoleUartDevice.EnqueueReceiveByte((byte)'o');
+        state.CiscoC2600ConsoleUartDevice.EnqueueReceiveByte((byte)'\r');
+        configDialogResponses++;
+    }
+
+    if (!enableIdleAssist)
+    {
+        return;
+    }
+
+    if (consoleOutput.Length == lastConsoleLength)
+    {
+        idleConsoleChunks++;
+    }
+    else
+    {
+        idleConsoleChunks = 0;
+    }
+
+    var currentProgramCounter = state.Machine.ProgramCounter;
+
+    if (currentProgramCounter == lastProgramCounter)
+    {
+        stagnantProgramCounterChunks++;
+    }
+    else
+    {
+        stagnantProgramCounterChunks = 0;
+    }
+
+    lastConsoleLength = consoleOutput.Length;
+    lastProgramCounter = currentProgramCounter;
+
+    if (idleConsoleChunks < 4 ||
+        stagnantProgramCounterChunks < 4)
+    {
+        return;
+    }
+
+    state.CiscoC2600ConsoleUartDevice.EnqueueReceiveByte((byte)'\r');
+    idleResponses++;
+    idleConsoleChunks = 0;
+    stagnantProgramCounterChunks = 0;
 }
 
 static string BuildCombinedConsoleOutput(string monitorOutput, string uartOutput)
@@ -4027,6 +4145,7 @@ sealed record ProbeCliOptions(
     int MaxHotSpots,
     long ProgressEveryInstructions,
     IReadOnlyList<ConsoleRepeatStopRule> StopOnConsoleRepeatRules,
+    bool AutoConsoleScript,
     uint? StopAtProgramCounter,
     IReadOnlyDictionary<uint, long> StopAtProgramCounterHits,
     uint? StopOnSupervisorService,

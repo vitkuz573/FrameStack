@@ -100,6 +100,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.FullHotSpots);
         command.Options.Add(CliOptions.ProgressEveryInstructions);
         command.Options.Add(CliOptions.StopOnConsoleRepeatRules);
+        command.Options.Add(CliOptions.AutoConsoleScript);
         command.Options.Add(CliOptions.ProfileNames);
         command.Options.Add(CliOptions.DisableNullProgramCounterRedirect);
         command.Options.Add(CliOptions.Disable8MbHighBitAlias);
@@ -193,6 +194,7 @@ internal static class ProbeCommandHandler
                 stopOnConsoleRepeatRules,
                 ParseConsoleRepeatStopRule("--stop-on-console-repeat", token));
         }
+        var autoConsoleScript = parseResult.GetValue(CliOptions.AutoConsoleScript);
 
         var stopAtProgramCounter = ParseOptionalUInt32(
             parseResult.GetValue(CliOptions.StopAtProgramCounter));
@@ -415,6 +417,7 @@ internal static class ProbeCommandHandler
             maxHotSpots,
             progressEveryInstructions,
             stopOnConsoleRepeatRules,
+            autoConsoleScript,
             stopAtProgramCounter,
             stopAtProgramCounterHits,
             stopOnSupervisorService,

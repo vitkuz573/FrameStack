@@ -55,7 +55,11 @@ public sealed class RuntimeImageBootstrapper
         }
 
         ApplyCiscoMemoryWriteProtection(ramBus, inspection);
-        var machineMemoryBus = BuildMachineMemoryBus(ramBus, inspection, consoleTransmitSink);
+        var machineMemoryBus = BuildMachineMemoryBus(
+            ramBus,
+            inspection,
+            consoleTransmitSink,
+            out var ciscoC2600ConsoleUartDevice);
 
         var lowVectorEntryStubInstalled =
             CiscoPowerPcLowVectorBootstrap.TryInstallEntryStub(machineMemoryBus, inspection, loadedImage.EntryPoint);
@@ -78,7 +82,12 @@ public sealed class RuntimeImageBootstrapper
             loadedImage.Segments.Count,
             inspection.Summary);
 
-        return new RuntimeSessionState(runtimeHandle, machine, report, cpuCore);
+        return new RuntimeSessionState(
+            runtimeHandle,
+            machine,
+            report,
+            cpuCore,
+            ciscoC2600ConsoleUartDevice);
     }
 
     private IImageLoader ResolveLoader(ImageInspectionResult inspection)
@@ -252,18 +261,21 @@ public sealed class RuntimeImageBootstrapper
     private static IMemoryBus BuildMachineMemoryBus(
         SparseMemoryBus ramBus,
         ImageInspectionResult inspection,
-        Action<byte>? consoleTransmitSink)
+        Action<byte>? consoleTransmitSink,
+        out CiscoC2600ConsoleUartIoDevice? ciscoC2600ConsoleUartDevice)
     {
         if (!string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
         {
+            ciscoC2600ConsoleUartDevice = null;
             return ramBus;
         }
 
         var mappedBus = new MemoryMappedBus(ramBus);
         mappedBus.RegisterDevice(new CiscoC2600Amdp2IoDevice());
         mappedBus.RegisterDevice(new CiscoC2600PortAdapterIoDevice());
-        mappedBus.RegisterDevice(new CiscoC2600ConsoleUartIoDevice(
-            transmitByteSink: consoleTransmitSink));
+        ciscoC2600ConsoleUartDevice = new CiscoC2600ConsoleUartIoDevice(
+            transmitByteSink: consoleTransmitSink);
+        mappedBus.RegisterDevice(ciscoC2600ConsoleUartDevice);
         return mappedBus;
     }
 }
