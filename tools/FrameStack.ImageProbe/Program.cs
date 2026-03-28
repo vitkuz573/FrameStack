@@ -281,6 +281,11 @@ if (cliOptions.Disable8MbHighBitAlias)
     Console.WriteLine("Disable8MbHighBitAlias: True");
 }
 
+if (cliOptions.DisableDynarec)
+{
+    Console.WriteLine("DisableDynarec: True");
+}
+
 if (TryMapVirtualAddressToFileOffset(inspection.Sections, inspection.EntryPoint, out var entryOffset))
 {
     Console.WriteLine($"EntryOffset: 0x{entryOffset:X8}");
@@ -385,6 +390,11 @@ try
         if (cliOptions.Disable8MbHighBitAlias)
         {
             powerPcCore.PreserveHighBitOn8MbTranslation = false;
+        }
+
+        if (cliOptions.DisableDynarec)
+        {
+            powerPcCore.DynarecEnabled = false;
         }
 
         if (cliOptions.SupervisorReturnOverrides.Count > 0 ||
@@ -4029,7 +4039,8 @@ sealed record ProbeCliOptions(
     int FindAsciiMaxResults,
     IReadOnlyList<string> ProfileNames,
     bool DisableNullProgramCounterRedirect,
-    bool Disable8MbHighBitAlias);
+    bool Disable8MbHighBitAlias,
+    bool DisableDynarec);
 
 sealed record TracedRunResult(
     long ExecutedInstructions,

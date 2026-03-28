@@ -43,6 +43,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const uint MachineStateInstructionRelocationMask = 0x0000_0020;
     private const uint DecrementerExceptionVectorOffset = 0x0000_0900;
     private const uint DecrementerExceptionHighVectorBase = 0xFFF0_0000;
+    private const uint CiscoC2600TimeHighPointerAddress = 0x82EB_0644;
+    private const uint CiscoC2600TimeLowPointerAddress = 0x82EB_0648;
+    private const uint CiscoC2600TimeCellRegionStart = 0x830E_0000;
+    private const uint CiscoC2600TimeCellRegionEnd = 0x830F_0000;
+    private const ulong CiscoC2600TimeCellUpdateIntervalMask = 0x0000_03FF;
     private const uint ExceptionMachineStateClearMask =
         MachineStateExternalInterruptEnableMask |
         MachineStateDataRelocationMask |
@@ -415,6 +420,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
         // PowerPC time-base advances independently from mftb reads.
         _timeBaseCounter++;
         TickDecrementer();
+        TryAdvanceCiscoC2600TimeCells(memoryBus);
 
         if (TryHandlePendingDecrementerInterrupt())
         {
@@ -1213,6 +1219,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         il.MarkLabel(executeLabel);
         il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldarg_1);
         il.Emit(OpCodes.Call, JitAdvanceTimeMethod);
         il.Emit(OpCodes.Brfalse_S, continueLabel);
         il.Emit(OpCodes.Ldloc, executedLocal);
@@ -1391,10 +1398,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
     }
 
-    private bool JitAdvanceTime()
+    private bool JitAdvanceTime(IMemoryBus memoryBus)
     {
         _timeBaseCounter++;
         TickDecrementer();
+        TryAdvanceCiscoC2600TimeCells(memoryBus);
         return TryHandlePendingDecrementerInterrupt();
     }
 
@@ -3310,6 +3318,46 @@ public sealed class PowerPc32CpuCore : ICpuCore
         {
             _decrementerInterruptPending = true;
         }
+    }
+
+    private void TryAdvanceCiscoC2600TimeCells(IMemoryBus memoryBus)
+    {
+        if ((_timeBaseCounter & CiscoC2600TimeCellUpdateIntervalMask) != 0)
+        {
+            return;
+        }
+
+        if (!TryReadSupervisorUInt32(memoryBus, CiscoC2600TimeHighPointerAddress, out var highWordAddress) ||
+            !TryReadSupervisorUInt32(memoryBus, CiscoC2600TimeLowPointerAddress, out var lowWordAddress) ||
+            !IsCiscoC2600TimeCellAddress(highWordAddress) ||
+            !IsCiscoC2600TimeCellAddress(lowWordAddress) ||
+            !TryReadSupervisorUInt32(memoryBus, highWordAddress, out var currentHighWord) ||
+            !TryReadSupervisorUInt32(memoryBus, lowWordAddress, out var currentLowWord))
+        {
+            return;
+        }
+
+        var currentTicks = ((ulong)currentHighWord << 32) | currentLowWord;
+        var scaledTimeBaseTicks = _timeBaseCounter >> 10;
+        var nextTicks = scaledTimeBaseTicks > currentTicks
+            ? scaledTimeBaseTicks
+            : currentTicks + 1;
+
+        var nextHighWord = (uint)(nextTicks >> 32);
+        var nextLowWord = unchecked((uint)nextTicks);
+
+        if (!TryWriteSupervisorUInt32(memoryBus, highWordAddress, nextHighWord))
+        {
+            return;
+        }
+
+        TryWriteSupervisorUInt32(memoryBus, lowWordAddress, nextLowWord);
+    }
+
+    private static bool IsCiscoC2600TimeCellAddress(uint address)
+    {
+        return address >= CiscoC2600TimeCellRegionStart &&
+               address < CiscoC2600TimeCellRegionEnd;
     }
 
     private bool TryHandlePendingDecrementerInterrupt()

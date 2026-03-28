@@ -103,6 +103,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.ProfileNames);
         command.Options.Add(CliOptions.DisableNullProgramCounterRedirect);
         command.Options.Add(CliOptions.Disable8MbHighBitAlias);
+        command.Options.Add(CliOptions.DisableDynarec);
         command.Options.Add(CliOptions.SupervisorReturnOverrides);
         command.Options.Add(CliOptions.SupervisorReturnCallerOverrides);
         command.Options.Add(CliOptions.SupervisorReturnSignatureOverrides);
@@ -440,7 +441,8 @@ internal static class ProbeCommandHandler
             findAsciiMaxResults,
             profileNames.ToArray(),
             parseResult.GetValue(CliOptions.DisableNullProgramCounterRedirect),
-            parseResult.GetValue(CliOptions.Disable8MbHighBitAlias));
+            parseResult.GetValue(CliOptions.Disable8MbHighBitAlias),
+            parseResult.GetValue(CliOptions.DisableDynarec));
     }
 
     private static void ApplyProbeProfiles(

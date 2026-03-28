@@ -149,6 +149,38 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
     }
 
     [Fact]
+    public void HandleShouldReturnCiscoC2600RawNvramCapacityForServiceEighteenSizingQuery()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler(hardwarePlatformId: 0x2B);
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x18,
+            Argument0: 0x0000_000C,
+            Argument1: 0x8347_1D10,
+            Argument2: 0x813F_A8C0,
+            Argument3: 0));
+
+        Assert.Equal(0x0000_2405u, result.ReturnValue);
+    }
+
+    [Fact]
+    public void HandleShouldReturnZeroForCiscoC2600NvramReservedServiceQuery()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler(hardwarePlatformId: 0x2B);
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x2F,
+            Argument0: 0x0000_000C,
+            Argument1: 0x8347_1D10,
+            Argument2: 0x813F_A8C0,
+            Argument3: 0));
+
+        Assert.Equal(0u, result.ReturnValue);
+    }
+
+    [Fact]
     public void HandleShouldReturnZeroForUnknownServices()
     {
         var handler = new DefaultPowerPcSupervisorCallHandler();

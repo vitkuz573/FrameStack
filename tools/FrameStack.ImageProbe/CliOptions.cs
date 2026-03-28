@@ -89,6 +89,11 @@ internal static class CliOptions
         Description = "Disable MPC8xx 8MB high-bit alias in address translation.",
     };
 
+    internal static readonly Option<bool> DisableDynarec = new("--disable-dynarec")
+    {
+        Description = "Disable PowerPC dynarec JIT and force interpreter execution.",
+    };
+
     internal static readonly Option<string[]> SupervisorReturnOverrides = CreateManyValueOption(
         "--svc-return",
         "Supervisor override <service>=<value>.");

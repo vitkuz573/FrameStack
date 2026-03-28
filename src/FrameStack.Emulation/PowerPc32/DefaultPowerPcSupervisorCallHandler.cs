@@ -6,9 +6,13 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private const uint CiscoC2600NvramSizeWordAddress = 0x830E_04D0;
     private const uint CiscoC2600NvramSizeCachedWordAddress = 0x830E_045C;
     private const uint CiscoC2600DefaultNvramSizeBytes = 0x0000_2000;
+    private const uint CiscoC2600NvramRawCapacityBytes = 0x0000_2405;
     private const uint CiscoC2600DeferredNvramSeedCallerPc = 0x8100_0000;
+    private const uint CiscoC2600NvramSizingQueryArg0 = 0x0000_000C;
     private const uint QueryInstalledRamService = 0x04;
     private const uint QueryHardwareProfileService = 0x07;
+    private const uint QueryCiscoC2600NvramCapacityService = 0x18;
+    private const uint QueryCiscoC2600NvramReservedService = 0x2F;
     private const uint BootstrapIoMemoryProfileService = 0x2C;
     private const uint QueryIoMemoryProfileService = 0x3A;
     private const uint SetIoMemoryProfileService = 0x3B;
@@ -86,6 +90,21 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
             return new PowerPcSupervisorCallResult(ReturnValue: 0);
         }
 
+        if (context.ServiceCode == QueryCiscoC2600NvramCapacityService &&
+            IsCiscoC2600NvramSizingQuery(context))
+        {
+            return new PowerPcSupervisorCallResult(ReturnValue: CiscoC2600NvramRawCapacityBytes);
+        }
+
+        if (context.ServiceCode == QueryCiscoC2600NvramReservedService &&
+            IsCiscoC2600NvramSizingQuery(context))
+        {
+            // C2600 IOS computes effective NVRAM bytes as:
+            // svc(0x18) - svc(0x2F) - 1029, then aligns to 4 bytes.
+            // Returning zero here with 0x18=0x2405 yields canonical 0x2000 bytes.
+            return new PowerPcSupervisorCallResult(ReturnValue: 0);
+        }
+
         if (context.ServiceCode == BootstrapIoMemoryProfileService)
         {
             var bootstrapProfile = ResolveIoMemoryProfileQueryResponse();
@@ -131,6 +150,21 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         // Most firmware wrappers expect zero on success.
         // A richer syscall/exception model will replace this default behavior.
         return new PowerPcSupervisorCallResult(ReturnValue: 0);
+    }
+
+    private bool IsCiscoC2600NvramSizingQuery(PowerPcSupervisorCallContext context)
+    {
+        if (_hardwarePlatformId != CiscoC2600HardwarePlatformId)
+        {
+            return false;
+        }
+
+        // The sizing wrapper observed in C2600 IOS 12.3(1a) issues
+        // svc 0x18/0x2F with this descriptor layout.
+        return context.Argument0 == CiscoC2600NvramSizingQueryArg0 &&
+               context.Argument1 >= 0x8000_0000 &&
+               context.Argument2 >= 0x8000_0000 &&
+               context.Argument3 == 0;
     }
 
     private void TrySeedCiscoC2600NvramSizeWords(PowerPcSupervisorCallContext context)

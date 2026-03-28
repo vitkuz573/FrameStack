@@ -9,6 +9,8 @@ public static class CiscoPowerPcLowVectorBootstrap
     private const uint OriR0OpcodeBase = 0x6000_0000;
     private const uint MoveR0ToCounterRegister = 0x7C09_03A6;
     private const uint BranchToCounterRegister = 0x4E80_0420;
+    private const uint ReturnFromInterruptInstruction = 0x4C00_0064;
+    private const uint DecrementerLowVectorAddress = 0x0000_0900;
 
     public static bool TryInstallEntryStub(
         IMemoryBus memoryBus,
@@ -24,20 +26,28 @@ public static class CiscoPowerPcLowVectorBootstrap
             return false;
         }
 
-        if (!ShouldInstallEntryStub(memoryBus))
+        var installed = false;
+
+        if (ShouldInstallEntryStub(memoryBus))
         {
-            return false;
+            var entryUpper = (entryPoint >> 16) & 0xFFFFu;
+            var entryLower = entryPoint & 0xFFFFu;
+
+            memoryBus.WriteUInt32(0x0000_0000, LisR0OpcodeBase | entryUpper);
+            memoryBus.WriteUInt32(0x0000_0004, OriR0OpcodeBase | entryLower);
+            memoryBus.WriteUInt32(0x0000_0008, MoveR0ToCounterRegister);
+            memoryBus.WriteUInt32(0x0000_000C, BranchToCounterRegister);
+            installed = true;
         }
 
-        var entryUpper = (entryPoint >> 16) & 0xFFFFu;
-        var entryLower = entryPoint & 0xFFFFu;
+        if (memoryBus.ReadUInt32(DecrementerLowVectorAddress) == 0)
+        {
+            // Keep decrementer interrupts recoverable even when low vectors are sparse.
+            memoryBus.WriteUInt32(DecrementerLowVectorAddress, ReturnFromInterruptInstruction);
+            installed = true;
+        }
 
-        memoryBus.WriteUInt32(0x0000_0000, LisR0OpcodeBase | entryUpper);
-        memoryBus.WriteUInt32(0x0000_0004, OriR0OpcodeBase | entryLower);
-        memoryBus.WriteUInt32(0x0000_0008, MoveR0ToCounterRegister);
-        memoryBus.WriteUInt32(0x0000_000C, BranchToCounterRegister);
-
-        return true;
+        return installed;
     }
 
     private static bool ShouldInstallEntryStub(IMemoryBus memoryBus)

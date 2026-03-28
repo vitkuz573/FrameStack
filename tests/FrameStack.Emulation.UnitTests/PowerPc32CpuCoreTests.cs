@@ -1856,6 +1856,47 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void ExecuteCyclesShouldAdvanceCiscoC2600SyntheticTimeCellsWhenPointersAreConfigured()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x1000, 0x4800_0000); // b 0x1000
+        memory.WriteUInt32(0x82EB_0644, 0x830E_3D44);
+        memory.WriteUInt32(0x82EB_0648, 0x830E_3D94);
+        memory.WriteUInt32(0x830E_3D44, 0);
+        memory.WriteUInt32(0x830E_3D94, 0);
+
+        cpu.Reset(0x1000);
+
+        var executed = cpu.ExecuteCycles(memory, 4096);
+
+        Assert.Equal(4096, executed);
+        Assert.Equal(0x1000u, cpu.ProgramCounter);
+        Assert.Equal(0u, memory.ReadUInt32(0x830E_3D44));
+        Assert.True(memory.ReadUInt32(0x830E_3D94) >= 4u);
+    }
+
+    [Fact]
+    public void ExecuteCyclesShouldIgnoreCiscoC2600SyntheticTimeUpdateForOutOfRangePointers()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new SparseMemoryBus(maxMappedBytes: 64UL * 1024UL * 1024UL);
+
+        memory.WriteUInt32(0x1000, 0x4800_0000); // b 0x1000
+        memory.WriteUInt32(0x82EB_0644, 0x8400_0000);
+        memory.WriteUInt32(0x82EB_0648, 0x8400_0004);
+        memory.WriteUInt32(0x830E_3D44, 0);
+        memory.WriteUInt32(0x830E_3D94, 0);
+
+        cpu.Reset(0x1000);
+        cpu.ExecuteCycles(memory, 4096);
+
+        Assert.Equal(0u, memory.ReadUInt32(0x830E_3D44));
+        Assert.Equal(0u, memory.ReadUInt32(0x830E_3D94));
+    }
+
+    [Fact]
     public void ExecuteCyclesShouldSkipDynarecWhenDisabled()
     {
         var cpu = new PowerPc32CpuCore
