@@ -13,15 +13,18 @@ public sealed class CiscoC2600ConsoleUartIoDevice : IMemoryMappedDevice
     private const byte StatusDataReadyMask = 0x01;
 
     private readonly Queue<byte> _receiveFifo = new();
+    private readonly bool _autoCarriageReturnWhenIdle;
 
     public CiscoC2600ConsoleUartIoDevice(
         uint baseAddress = DefaultBaseAddress,
         Action<byte>? transmitByteSink = null,
-        IEnumerable<byte>? initialReceiveBytes = null)
+        IEnumerable<byte>? initialReceiveBytes = null,
+        bool autoCarriageReturnWhenIdle = false)
     {
         BaseAddress = baseAddress;
         SizeBytes = DefaultMappedSizeBytes;
         TransmitByteSink = transmitByteSink;
+        _autoCarriageReturnWhenIdle = autoCarriageReturnWhenIdle;
 
         var seededBytes = initialReceiveBytes ?? [(byte)'\r'];
         foreach (var value in seededBytes)
@@ -40,11 +43,13 @@ public sealed class CiscoC2600ConsoleUartIoDevice : IMemoryMappedDevice
     {
         if (offset == StatusRegisterOffset)
         {
+            EnsureReceiveDataReadyIfConfigured();
             return BuildStatusValue();
         }
 
         if (offset == DataRegisterOffset)
         {
+            EnsureReceiveDataReadyIfConfigured();
             return _receiveFifo.Count > 0
                 ? _receiveFifo.Dequeue()
                 : (byte)0;
@@ -100,5 +105,16 @@ public sealed class CiscoC2600ConsoleUartIoDevice : IMemoryMappedDevice
         }
 
         return value;
+    }
+
+    private void EnsureReceiveDataReadyIfConfigured()
+    {
+        if (!_autoCarriageReturnWhenIdle ||
+            _receiveFifo.Count > 0)
+        {
+            return;
+        }
+
+        _receiveFifo.Enqueue((byte)'\r');
     }
 }

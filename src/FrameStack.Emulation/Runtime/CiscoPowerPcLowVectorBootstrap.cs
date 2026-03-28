@@ -9,23 +9,6 @@ public static class CiscoPowerPcLowVectorBootstrap
     private const uint OriR0OpcodeBase = 0x6000_0000;
     private const uint MoveR0ToCounterRegister = 0x7C09_03A6;
     private const uint BranchToCounterRegister = 0x4E80_0420;
-    private const uint ReturnFromInterrupt = 0x4C00_0064;
-
-    private static readonly uint[] ExceptionVectorOffsets =
-    [
-        0x0000_0100,
-        0x0000_0200,
-        0x0000_0300,
-        0x0000_0400,
-        0x0000_0500,
-        0x0000_0600,
-        0x0000_0700,
-        0x0000_0800,
-        0x0000_0900,
-        0x0000_0C00,
-        0x0000_0D00,
-        0x0000_0F00
-    ];
 
     public static bool TryInstallEntryStub(
         IMemoryBus memoryBus,
@@ -53,7 +36,6 @@ public static class CiscoPowerPcLowVectorBootstrap
         memoryBus.WriteUInt32(0x0000_0004, OriR0OpcodeBase | entryLower);
         memoryBus.WriteUInt32(0x0000_0008, MoveR0ToCounterRegister);
         memoryBus.WriteUInt32(0x0000_000C, BranchToCounterRegister);
-        InstallDefaultExceptionStubs(memoryBus);
 
         return true;
     }
@@ -63,16 +45,5 @@ public static class CiscoPowerPcLowVectorBootstrap
         // A zero first word indicates no executable null-vector handler.
         // Other words may contain boot scratch values in restored checkpoints.
         return memoryBus.ReadUInt32(0x0000_0000) == 0;
-    }
-
-    private static void InstallDefaultExceptionStubs(IMemoryBus memoryBus)
-    {
-        foreach (var vectorOffset in ExceptionVectorOffsets)
-        {
-            if (memoryBus.ReadUInt32(vectorOffset) == 0)
-            {
-                memoryBus.WriteUInt32(vectorOffset, ReturnFromInterrupt);
-            }
-        }
     }
 }

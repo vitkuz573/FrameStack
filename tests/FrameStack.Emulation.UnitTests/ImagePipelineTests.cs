@@ -167,7 +167,7 @@ public sealed class ImagePipelineTests
         mappedBus.WriteByte(0xFFE0_0000, 0x41);
 
         Assert.Equal((byte)0x80, mappedBus.ReadByte(0x6740_0014));
-        Assert.Equal((byte)0x70, mappedBus.ReadByte(0xFFE0_0005));
+        Assert.Equal((byte)0x71, mappedBus.ReadByte(0xFFE0_0005));
         Assert.True((firstBitSample & 0x80) != 0);
         Assert.True((secondBitSample & 0x80) == 0);
     }
@@ -274,7 +274,7 @@ public sealed class ImagePipelineTests
         Assert.Equal(0x60008000u, state.Machine.ReadUInt32(0x00000004));
         Assert.Equal(0x7C0903A6u, state.Machine.ReadUInt32(0x00000008));
         Assert.Equal(0x4E800420u, state.Machine.ReadUInt32(0x0000000C));
-        Assert.Equal(0x4C000064u, state.Machine.ReadUInt32(0x00000900));
+        Assert.Equal(0u, state.Machine.ReadUInt32(0x00000900));
 
         var summary = state.Machine.Run(instructionBudget: 4);
 
@@ -368,6 +368,30 @@ public sealed class ImagePipelineTests
         memoryBus.WriteUInt32(0x8336_67E0, 0xAABB_CCDD);
 
         Assert.Equal(0x1122_3344u, memoryBus.ReadUInt32(0x8336_67E0));
+    }
+
+    [Fact]
+    public void BootstrapShouldSeedAndProtectCiscoC2600NvramSizeWords()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-c2600-nvram-size-seed",
+            imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
+            memoryMb: 128);
+
+        var memoryBus = ResolveSparseMemoryBus(state.Machine.MemoryBus);
+
+        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_04D0));
+        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_045C));
+
+        memoryBus.WriteUInt32(0x830E_04D0, 0xFFFF_FBF8);
+        memoryBus.WriteUInt32(0x830E_045C, 0xFFFF_FBF8);
+
+        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_04D0));
+        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_045C));
     }
 
     [Fact]

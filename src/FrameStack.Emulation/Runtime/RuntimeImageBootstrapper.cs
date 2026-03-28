@@ -17,6 +17,9 @@ public sealed class RuntimeImageBootstrapper
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
     private const uint CiscoC2600IoMemoryDescriptorAddress = 0x8336_67E0;
     private const uint CiscoC2600IoMemoryDescriptorSizeBytes = 0x10;
+    private const uint CiscoC2600NvramSizeWordAddress = 0x830E_04D0;
+    private const uint CiscoC2600NvramSizeCachedWordAddress = 0x830E_045C;
+    private const uint CiscoC2600DefaultNvramSizeBytes = 0x0000_2000;
 
     private readonly IImageAnalyzer _imageAnalyzer;
     private readonly IReadOnlyList<IImageLoader> _imageLoaders;
@@ -235,6 +238,14 @@ public sealed class RuntimeImageBootstrapper
             return;
         }
 
+        // IOS C2600 bootstrap may derive a negative synthesized NVRAM size when
+        // the probe path runs without complete board-level NVRAM emulation.
+        // Seed and pin both size words to a minimal positive NVRAM profile.
+        memoryBus.WriteUInt32(CiscoC2600NvramSizeWordAddress, CiscoC2600DefaultNvramSizeBytes);
+        memoryBus.WriteUInt32(CiscoC2600NvramSizeCachedWordAddress, CiscoC2600DefaultNvramSizeBytes);
+        memoryBus.ProtectWriteRange(CiscoC2600NvramSizeWordAddress, sizeof(uint));
+        memoryBus.ProtectWriteRange(CiscoC2600NvramSizeCachedWordAddress, sizeof(uint));
+
         memoryBus.ProtectWriteRange(
             CiscoC2600IoMemoryDescriptorAddress,
             CiscoC2600IoMemoryDescriptorSizeBytes);
@@ -253,7 +264,9 @@ public sealed class RuntimeImageBootstrapper
         var mappedBus = new MemoryMappedBus(ramBus);
         mappedBus.RegisterDevice(new CiscoC2600Amdp2IoDevice());
         mappedBus.RegisterDevice(new CiscoC2600PortAdapterIoDevice());
-        mappedBus.RegisterDevice(new CiscoC2600ConsoleUartIoDevice(transmitByteSink: consoleTransmitSink));
+        mappedBus.RegisterDevice(new CiscoC2600ConsoleUartIoDevice(
+            transmitByteSink: consoleTransmitSink,
+            autoCarriageReturnWhenIdle: true));
         return mappedBus;
     }
 }
