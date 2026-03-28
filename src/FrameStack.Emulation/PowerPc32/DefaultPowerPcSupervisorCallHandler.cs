@@ -2,6 +2,11 @@ namespace FrameStack.Emulation.PowerPc32;
 
 public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCallHandler
 {
+    private const uint CiscoC2600HardwarePlatformId = 0x2B;
+    private const uint CiscoC2600NvramSizeWordAddress = 0x830E_04D0;
+    private const uint CiscoC2600NvramSizeCachedWordAddress = 0x830E_045C;
+    private const uint CiscoC2600DefaultNvramSizeBytes = 0x0000_2000;
+    private const uint CiscoC2600DeferredNvramSeedCallerPc = 0x8100_0000;
     private const uint QueryInstalledRamService = 0x04;
     private const uint QueryHardwareProfileService = 0x07;
     private const uint BootstrapIoMemoryProfileService = 0x2C;
@@ -23,6 +28,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private readonly uint _hardwarePlatformId;
     private uint _manualIoMemoryProfilePercent;
     private bool _hasManualIoMemoryProfile;
+    private bool _ciscoC2600NvramSizeWordsSeeded;
 
     public DefaultPowerPcSupervisorCallHandler(
         uint reportedMemoryBytes = DefaultReportedMemoryBytes,
@@ -38,6 +44,8 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
 
     public PowerPcSupervisorCallResult Handle(PowerPcSupervisorCallContext context)
     {
+        TrySeedCiscoC2600NvramSizeWords(context);
+
         if (context.ServiceCode == QueryInstalledRamService)
         {
             if (IsSmartInitIoMemorySizingQuery(context))
@@ -123,6 +131,34 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         // Most firmware wrappers expect zero on success.
         // A richer syscall/exception model will replace this default behavior.
         return new PowerPcSupervisorCallResult(ReturnValue: 0);
+    }
+
+    private void TrySeedCiscoC2600NvramSizeWords(PowerPcSupervisorCallContext context)
+    {
+        if (_ciscoC2600NvramSizeWordsSeeded ||
+            _hardwarePlatformId != CiscoC2600HardwarePlatformId ||
+            context.CallerProgramCounter < CiscoC2600DeferredNvramSeedCallerPc)
+        {
+            return;
+        }
+
+        var primaryWritten = context.TryWriteDataUInt32(
+            CiscoC2600NvramSizeWordAddress,
+            CiscoC2600DefaultNvramSizeBytes);
+        var cachedWritten = context.TryWriteDataUInt32(
+            CiscoC2600NvramSizeCachedWordAddress,
+            CiscoC2600DefaultNvramSizeBytes);
+
+        if (!primaryWritten || !cachedWritten)
+        {
+            return;
+        }
+
+        _ciscoC2600NvramSizeWordsSeeded =
+            context.TryReadDataUInt32(CiscoC2600NvramSizeWordAddress, out var primaryWord) &&
+            primaryWord == CiscoC2600DefaultNvramSizeBytes &&
+            context.TryReadDataUInt32(CiscoC2600NvramSizeCachedWordAddress, out var cachedWord) &&
+            cachedWord == CiscoC2600DefaultNvramSizeBytes;
     }
 
     private static bool IsSmartInitIoMemorySizingQuery(PowerPcSupervisorCallContext context)

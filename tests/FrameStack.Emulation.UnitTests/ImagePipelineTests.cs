@@ -371,27 +371,26 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
-    public void BootstrapShouldSeedAndProtectCiscoC2600NvramSizeWords()
+    public void BootstrapShouldProtectCiscoC2600NvramSizeWordsWithoutPreseedingValues()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
             new BinaryImageAnalyzer(),
             [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
 
         var state = bootstrapper.Bootstrap(
-            runtimeHandle: "native-ppc-c2600-nvram-size-seed",
+            runtimeHandle: "native-ppc-c2600-nvram-size-bootstrap",
             imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
             memoryMb: 128);
 
         var memoryBus = ResolveSparseMemoryBus(state.Machine.MemoryBus);
+        var initialMainWord = memoryBus.ReadUInt32(0x830E_04D0);
+        var initialCachedWord = memoryBus.ReadUInt32(0x830E_045C);
 
-        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_04D0));
-        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_045C));
+        memoryBus.WriteUInt32(0x830E_04D0, 0x0000_2000);
+        memoryBus.WriteUInt32(0x830E_045C, 0x0000_2000);
 
-        memoryBus.WriteUInt32(0x830E_04D0, 0xFFFF_FBF8);
-        memoryBus.WriteUInt32(0x830E_045C, 0xFFFF_FBF8);
-
-        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_04D0));
-        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_045C));
+        Assert.Equal(initialMainWord, memoryBus.ReadUInt32(0x830E_04D0));
+        Assert.Equal(initialCachedWord, memoryBus.ReadUInt32(0x830E_045C));
     }
 
     [Fact]

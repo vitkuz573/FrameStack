@@ -318,4 +318,45 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
         Assert.Equal(0x0000_8000u, writes[0x2008]);
         Assert.Equal(0x0091_0091u, writes[0x200C]);
     }
+
+    [Fact]
+    public void HandleShouldDeferCiscoC2600NvramSeedUntilPostBootstrapCallerRange()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler(hardwarePlatformId: 0x2B);
+        var memory = new Dictionary<uint, uint>
+        {
+            [0x830E_04D0] = 0xDEAD_BEEF,
+            [0x830E_045C] = 0xCAFE_BABE,
+        };
+
+        var firstCall = new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x3C,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0,
+            Argument3: 0,
+            LinkRegister: 0x8000_0044,
+            TryReadUInt32: (uint address, out uint value) => memory.TryGetValue(address, out value),
+            TryWriteUInt32: (uint address, uint value) =>
+            {
+                memory[address] = value;
+                return true;
+            });
+
+        handler.Handle(firstCall);
+
+        Assert.Equal(0xDEAD_BEEFu, memory[0x830E_04D0]);
+        Assert.Equal(0xCAFE_BABEu, memory[0x830E_045C]);
+
+        var secondCall = firstCall with
+        {
+            LinkRegister = 0x816D_A1DC,
+        };
+
+        handler.Handle(secondCall);
+
+        Assert.Equal(0x0000_2000u, memory[0x830E_04D0]);
+        Assert.Equal(0x0000_2000u, memory[0x830E_045C]);
+    }
 }

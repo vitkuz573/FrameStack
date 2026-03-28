@@ -19,7 +19,6 @@ public sealed class RuntimeImageBootstrapper
     private const uint CiscoC2600IoMemoryDescriptorSizeBytes = 0x10;
     private const uint CiscoC2600NvramSizeWordAddress = 0x830E_04D0;
     private const uint CiscoC2600NvramSizeCachedWordAddress = 0x830E_045C;
-    private const uint CiscoC2600DefaultNvramSizeBytes = 0x0000_2000;
 
     private readonly IImageAnalyzer _imageAnalyzer;
     private readonly IReadOnlyList<IImageLoader> _imageLoaders;
@@ -238,11 +237,6 @@ public sealed class RuntimeImageBootstrapper
             return;
         }
 
-        // IOS C2600 bootstrap may derive a negative synthesized NVRAM size when
-        // the probe path runs without complete board-level NVRAM emulation.
-        // Seed and pin both size words to a minimal positive NVRAM profile.
-        memoryBus.WriteUInt32(CiscoC2600NvramSizeWordAddress, CiscoC2600DefaultNvramSizeBytes);
-        memoryBus.WriteUInt32(CiscoC2600NvramSizeCachedWordAddress, CiscoC2600DefaultNvramSizeBytes);
         memoryBus.ProtectWriteRange(CiscoC2600NvramSizeWordAddress, sizeof(uint));
         memoryBus.ProtectWriteRange(CiscoC2600NvramSizeCachedWordAddress, sizeof(uint));
 
