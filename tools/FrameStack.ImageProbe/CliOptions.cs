@@ -212,6 +212,23 @@ internal static class CliOptions
         "--global32-ea",
         "Named global effective address <name>=<address>.");
 
+    internal static readonly Option<string[]> CStringDumpRequests = CreateManyValueOption(
+        "--dump-cstring",
+        "Dump C string from memory using <address>[:<max-bytes>].");
+
+    internal static readonly Option<string[]> FindAsciiPatterns = CreateManyValueOption(
+        "--find-ascii",
+        "Find ASCII text pattern in memory.");
+
+    internal static readonly Option<string[]> FindAsciiRanges = CreateManyValueOption(
+        "--find-ascii-range",
+        "Memory range for ASCII search <start>:<end>.");
+
+    internal static readonly Option<int?> FindAsciiMaxResults = new("--find-ascii-max")
+    {
+        Description = "Maximum matches per ASCII pattern.",
+    };
+
     private static Option<string?> CreateSingleValueOption(string name, string description)
     {
         return new Option<string?>(name)

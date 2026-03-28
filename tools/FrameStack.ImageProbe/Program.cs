@@ -207,6 +207,25 @@ if (cliOptions.NamedGlobalEffectiveAddresses.Count > 0)
         $"Global32EA: {string.Join(", ", cliOptions.NamedGlobalEffectiveAddresses.OrderBy(entry => entry.Name, StringComparer.Ordinal).Select(entry => $"{entry.Name}=0x{entry.Address:X8}"))}");
 }
 
+if (cliOptions.CStringDumpRequests.Count > 0)
+{
+    Console.WriteLine(
+        $"DumpCString: {string.Join(", ", cliOptions.CStringDumpRequests.Select(request => $"0x{request.Address:X8}:{request.MaxBytes}"))}");
+}
+
+if (cliOptions.FindAsciiPatterns.Count > 0)
+{
+    Console.WriteLine(
+        $"FindAscii: {string.Join(", ", cliOptions.FindAsciiPatterns.Select(pattern => $"\"{pattern}\""))}");
+    if (cliOptions.FindAsciiRanges.Count > 0)
+    {
+        Console.WriteLine(
+            $"FindAsciiRange: {string.Join(", ", cliOptions.FindAsciiRanges.Select(range => $"0x{range.Start:X8}:0x{range.End:X8}"))}");
+    }
+
+    Console.WriteLine($"FindAsciiMax: {cliOptions.FindAsciiMaxResults}");
+}
+
 if (cliOptions.TrackedProgramCounters.Count > 0)
 {
     Console.WriteLine(
@@ -741,7 +760,18 @@ if (powerPcCore is not null)
         cliOptions.NamedGlobalAddresses,
         powerPcCore,
         cliOptions.NamedGlobalEffectiveAddresses);
+    var cStringDumps = ReadCStringDumps(
+        state.Machine,
+        cliOptions.CStringDumpRequests);
+    var findAsciiRanges = ResolveFindAsciiRanges(cliOptions, memoryMb);
+    var asciiMatches = FindAsciiMatches(
+        state.Machine,
+        cliOptions.FindAsciiPatterns,
+        findAsciiRanges,
+        cliOptions.FindAsciiMaxResults);
     PrintNamedGlobals(namedGlobals);
+    PrintCStringDumps(cStringDumps);
+    PrintAsciiMatches(asciiMatches);
     PrintDynamicWatch(state.Machine, powerPcCore, cliOptions.DynamicWatchWordRequests);
     PrintEffectiveWatch(state.Machine, powerPcCore, cliOptions.WatchWordEffectiveAddresses);
     Console.WriteLine("HotSpots:");
@@ -965,6 +995,8 @@ if (powerPcCore is not null)
             topHotSpots,
             trackedProgramCounterHits,
             namedGlobals,
+            cStringDumps,
+            asciiMatches,
             cliOptions.ProfileNames,
             nullProgramCounterRedirectCount,
             nullProgramCounterRedirectEvents,
@@ -1468,7 +1500,9 @@ static TracedRunResult RunBudgetWithTrace(
     {
         var currentChunk = (int)Math.Min(remaining, chunkBudget);
 
-        if (instructionTraceEnabled && currentChunk > 1)
+        if (instructionTraceEnabled &&
+            instructionTraceEvents!.Count < traceInstructionMaxEvents &&
+            currentChunk > 1)
         {
             // Step one instruction at a time when instruction tracing is enabled.
             currentChunk = 1;
@@ -3050,6 +3084,230 @@ static void PrintNamedGlobals(IReadOnlyDictionary<string, uint> globals)
     }
 }
 
+static IReadOnlyDictionary<string, string> ReadCStringDumps(
+    EmulationMachine machine,
+    IReadOnlyList<CStringDumpRequest> requests)
+{
+    if (requests.Count == 0)
+    {
+        return new Dictionary<string, string>(0, StringComparer.Ordinal);
+    }
+
+    var values = new Dictionary<string, string>(requests.Count, StringComparer.Ordinal);
+
+    foreach (var request in requests)
+    {
+        var bytes = new List<byte>(request.MaxBytes);
+
+        for (var index = 0; index < request.MaxBytes; index++)
+        {
+            var address = unchecked(request.Address + (uint)index);
+            var value = machine.ReadByte(address);
+
+            if (value == 0)
+            {
+                break;
+            }
+
+            bytes.Add(value);
+        }
+
+        values[$"0x{request.Address:X8}"] = FormatCStringBytes(bytes);
+    }
+
+    return values;
+}
+
+static void PrintCStringDumps(IReadOnlyDictionary<string, string> cStringDumps)
+{
+    if (cStringDumps.Count == 0)
+    {
+        return;
+    }
+
+    Console.WriteLine("CStringDumps:");
+
+    foreach (var dump in cStringDumps.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+    {
+        Console.WriteLine($"  {dump.Key}=\"{dump.Value}\"");
+    }
+}
+
+static IReadOnlyList<AddressRange> ResolveFindAsciiRanges(
+    ProbeCliOptions cliOptions,
+    int memoryMb)
+{
+    if (cliOptions.FindAsciiRanges.Count > 0)
+    {
+        return cliOptions.FindAsciiRanges;
+    }
+
+    if (memoryMb <= 0)
+    {
+        return Array.Empty<AddressRange>();
+    }
+
+    var start = 0x8000_0000u;
+    var spanBytes = (ulong)memoryMb * 1024UL * 1024UL;
+    var end = spanBytes == 0
+        ? start
+        : start + (uint)Math.Min(spanBytes - 1, uint.MaxValue - start);
+
+    return [new AddressRange(start, end)];
+}
+
+static IReadOnlyDictionary<string, IReadOnlyList<uint>> FindAsciiMatches(
+    EmulationMachine machine,
+    IReadOnlyList<string> patterns,
+    IReadOnlyList<AddressRange> ranges,
+    int maxMatchesPerPattern)
+{
+    if (patterns.Count == 0 || ranges.Count == 0 || maxMatchesPerPattern <= 0)
+    {
+        return new Dictionary<string, IReadOnlyList<uint>>(0, StringComparer.Ordinal);
+    }
+
+    var encodedPatterns = patterns
+        .Distinct(StringComparer.Ordinal)
+        .Select(pattern => (Pattern: pattern, Bytes: Encoding.ASCII.GetBytes(pattern)))
+        .Where(entry => entry.Bytes.Length > 0)
+        .ToArray();
+
+    if (encodedPatterns.Length == 0)
+    {
+        return new Dictionary<string, IReadOnlyList<uint>>(0, StringComparer.Ordinal);
+    }
+
+    var matches = encodedPatterns.ToDictionary(
+        entry => entry.Pattern,
+        _ => new List<uint>(),
+        StringComparer.Ordinal);
+
+    foreach (var range in ranges)
+    {
+        foreach (var entry in encodedPatterns)
+        {
+            var patternBytes = entry.Bytes;
+            var currentMatches = matches[entry.Pattern];
+
+            if (currentMatches.Count >= maxMatchesPerPattern ||
+                range.End < range.Start ||
+                range.End - range.Start + 1 < patternBytes.Length)
+            {
+                continue;
+            }
+
+            var lastStartAddress = range.End - (uint)patternBytes.Length + 1;
+
+            for (var address = range.Start; address <= lastStartAddress; address++)
+            {
+                if (MatchesAsciiPattern(machine, address, patternBytes))
+                {
+                    currentMatches.Add(address);
+
+                    if (currentMatches.Count >= maxMatchesPerPattern)
+                    {
+                        break;
+                    }
+                }
+
+                if (address == uint.MaxValue)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    return matches
+        .Where(entry => entry.Value.Count > 0)
+        .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+        .ToDictionary(
+            entry => entry.Key,
+            entry => (IReadOnlyList<uint>)entry.Value.ToArray(),
+            StringComparer.Ordinal);
+}
+
+static bool MatchesAsciiPattern(
+    EmulationMachine machine,
+    uint startAddress,
+    ReadOnlySpan<byte> patternBytes)
+{
+    for (var index = 0; index < patternBytes.Length; index++)
+    {
+        var address = unchecked(startAddress + (uint)index);
+        var value = machine.ReadByte(address);
+
+        if (value != patternBytes[index])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void PrintAsciiMatches(IReadOnlyDictionary<string, IReadOnlyList<uint>> asciiMatches)
+{
+    if (asciiMatches.Count == 0)
+    {
+        return;
+    }
+
+    Console.WriteLine("AsciiMatches:");
+
+    foreach (var match in asciiMatches.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+    {
+        Console.WriteLine(
+            $"  \"{match.Key}\": {string.Join(", ", match.Value.Select(address => $"0x{address:X8}"))}");
+    }
+}
+
+static string FormatCStringBytes(IReadOnlyList<byte> bytes)
+{
+    if (bytes.Count == 0)
+    {
+        return string.Empty;
+    }
+
+    var builder = new StringBuilder(bytes.Count);
+
+    foreach (var value in bytes)
+    {
+        if (TryDecodeConsoleCharacter(value, out var character))
+        {
+            switch (character)
+            {
+                case '\r':
+                    builder.Append("\\r");
+                    break;
+                case '\n':
+                    builder.Append("\\n");
+                    break;
+                case '\t':
+                    builder.Append("\\t");
+                    break;
+                case '"':
+                    builder.Append("\\\"");
+                    break;
+                case '\\':
+                    builder.Append("\\\\");
+                    break;
+                default:
+                    builder.Append(character);
+                    break;
+            }
+
+            continue;
+        }
+
+        builder.Append("\\x");
+        builder.Append(value.ToString("X2", CultureInfo.InvariantCulture));
+    }
+
+    return builder.ToString();
+}
+
 static void PrintDynamicWatch(
     EmulationMachine machine,
     PowerPc32CpuCore? powerPcCore,
@@ -3483,6 +3741,8 @@ static ProbeRunReport CreateProbeReport(
     IReadOnlyList<KeyValuePair<uint, long>> topHotSpots,
     IReadOnlyDictionary<uint, long> trackedProgramCounterHits,
     IReadOnlyDictionary<string, uint> namedGlobals,
+    IReadOnlyDictionary<string, string> cStringDumps,
+    IReadOnlyDictionary<string, IReadOnlyList<uint>> asciiMatches,
     IReadOnlyList<string> profileNames,
     long nullProgramCounterRedirectCount,
     IReadOnlyList<PowerPcNullProgramCounterRedirectEvent> nullProgramCounterRedirectEvents,
@@ -3502,6 +3762,20 @@ static ProbeRunReport CreateProbeReport(
         .ToDictionary(
             entry => $"0x{entry.Key:X8}",
             entry => entry.Value,
+            StringComparer.Ordinal);
+    var cStringDumpValues = cStringDumps
+        .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+        .ToDictionary(
+            entry => entry.Key,
+            entry => entry.Value,
+            StringComparer.Ordinal);
+    var asciiMatchValues = asciiMatches
+        .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+        .ToDictionary(
+            entry => entry.Key,
+            entry => (IReadOnlyList<string>)entry.Value
+                .Select(address => $"0x{address:X8}")
+                .ToArray(),
             StringComparer.Ordinal);
     var hotSpots = topHotSpots
         .Select(entry => new ProbeHotSpotReport($"0x{entry.Key:X8}", entry.Value))
@@ -3660,6 +3934,8 @@ static ProbeRunReport CreateProbeReport(
         nullProgramCounterRedirectSourceCounts,
         nullProgramCounterRedirectTrace,
         globalValues,
+        cStringDumpValues,
+        asciiMatchValues,
         trackedHits,
         hotSpots,
         tail,
@@ -3747,6 +4023,10 @@ sealed record ProbeCliOptions(
     IReadOnlyList<uint> TrackedProgramCounters,
     IReadOnlyList<NamedAddress> NamedGlobalAddresses,
     IReadOnlyList<NamedAddress> NamedGlobalEffectiveAddresses,
+    IReadOnlyList<CStringDumpRequest> CStringDumpRequests,
+    IReadOnlyList<string> FindAsciiPatterns,
+    IReadOnlyList<AddressRange> FindAsciiRanges,
+    int FindAsciiMaxResults,
     IReadOnlyList<string> ProfileNames,
     bool DisableNullProgramCounterRedirect,
     bool Disable8MbHighBitAlias);
@@ -3822,6 +4102,8 @@ sealed record ProbeRunReport(
     IReadOnlyDictionary<string, long> NullProgramCounterRedirectSources,
     IReadOnlyList<ProbeNullProgramCounterRedirectReport> NullProgramCounterRedirectTrace,
     IReadOnlyDictionary<string, string> Globals32,
+    IReadOnlyDictionary<string, string> CStringDumps,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> AsciiMatches,
     IReadOnlyDictionary<string, long> TrackedProgramCounterHits,
     IReadOnlyList<ProbeHotSpotReport> HotSpots,
     IReadOnlyList<string> ProgramCounterTail,
@@ -3974,6 +4256,10 @@ sealed record InstructionWindowRequest(
 sealed record NamedAddress(
     string Name,
     uint Address);
+
+sealed record CStringDumpRequest(
+    uint Address,
+    int MaxBytes);
 
 sealed record DynamicWatchWordRequest(
     int RegisterIndex,

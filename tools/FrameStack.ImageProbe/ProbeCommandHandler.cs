@@ -18,6 +18,8 @@ internal static class ProbeCommandHandler
     private const int DefaultMaxMemoryAccessWatchEvents = 4096;
     private const int DefaultMaxInstructionTraceEvents = 4096;
     private const int DefaultMaxSupervisorTraceEvents = 4096;
+    private const int DefaultCStringDumpMaxBytes = 160;
+    private const int DefaultFindAsciiMaxResults = 32;
 
     internal static bool TryParse(
         string[] args,
@@ -130,6 +132,10 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.TrackedProgramCounters);
         command.Options.Add(CliOptions.NamedGlobalAddresses);
         command.Options.Add(CliOptions.NamedGlobalEffectiveAddresses);
+        command.Options.Add(CliOptions.CStringDumpRequests);
+        command.Options.Add(CliOptions.FindAsciiPatterns);
+        command.Options.Add(CliOptions.FindAsciiRanges);
+        command.Options.Add(CliOptions.FindAsciiMaxResults);
 
         return command;
     }
@@ -343,6 +349,34 @@ internal static class ProbeCommandHandler
             AddDistinct(namedGlobalEffectiveAddresses, ParseNamedAddress("--global32-ea", token));
         }
 
+        var cStringDumpRequests = new List<CStringDumpRequest>();
+        foreach (var token in parseResult.GetValue(CliOptions.CStringDumpRequests) ?? [])
+        {
+            AddDistinct(cStringDumpRequests, ParseCStringDumpRequest("--dump-cstring", token));
+        }
+
+        var findAsciiPatterns = new List<string>();
+        foreach (var token in parseResult.GetValue(CliOptions.FindAsciiPatterns) ?? [])
+        {
+            if (!string.IsNullOrEmpty(token))
+            {
+                AddDistinct(findAsciiPatterns, token);
+            }
+        }
+
+        var findAsciiRanges = new List<AddressRange>();
+        foreach (var token in parseResult.GetValue(CliOptions.FindAsciiRanges) ?? [])
+        {
+            AddDistinct(
+                findAsciiRanges,
+                ParseAddressRange("--find-ascii-range", token));
+        }
+
+        var findAsciiMaxResultsValue = parseResult.GetValue(CliOptions.FindAsciiMaxResults);
+        var findAsciiMaxResults = findAsciiMaxResultsValue.HasValue
+            ? EnsurePositiveInt("--find-ascii-max", findAsciiMaxResultsValue.Value)
+            : DefaultFindAsciiMaxResults;
+
         var profileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var profileName in parseResult.GetValue(CliOptions.ProfileNames) ?? [])
         {
@@ -400,6 +434,10 @@ internal static class ProbeCommandHandler
             trackedProgramCounters,
             namedGlobalAddresses,
             namedGlobalEffectiveAddresses,
+            cStringDumpRequests,
+            findAsciiPatterns,
+            findAsciiRanges,
+            findAsciiMaxResults,
             profileNames.ToArray(),
             parseResult.GetValue(CliOptions.DisableNullProgramCounterRedirect),
             parseResult.GetValue(CliOptions.Disable8MbHighBitAlias));
@@ -725,6 +763,27 @@ internal static class ProbeCommandHandler
 
         var address = ParseUInt32Flexible(token[(separator + 1)..].Trim());
         return new NamedAddress(name, address);
+    }
+
+    private static CStringDumpRequest ParseCStringDumpRequest(string optionName, string token)
+    {
+        var parts = token.Split(':', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length is < 1 or > 2)
+        {
+            throw new ArgumentException(
+                $"Invalid '{optionName}' value '{token}'. Expected format '<address>[:<max-bytes>]'.");
+        }
+
+        var address = ParseUInt32Flexible(parts[0]);
+        var maxBytes = DefaultCStringDumpMaxBytes;
+
+        if (parts.Length == 2)
+        {
+            maxBytes = EnsurePositiveInt(optionName, int.Parse(parts[1], CultureInfo.InvariantCulture));
+        }
+
+        return new CStringDumpRequest(address, maxBytes);
     }
 
     private static DynamicWatchWordRequest ParseDynamicWatchWordRequest(string optionName, string token)

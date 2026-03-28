@@ -259,8 +259,7 @@ public sealed class RuntimeImageBootstrapper
         mappedBus.RegisterDevice(new CiscoC2600Amdp2IoDevice());
         mappedBus.RegisterDevice(new CiscoC2600PortAdapterIoDevice());
         mappedBus.RegisterDevice(new CiscoC2600ConsoleUartIoDevice(
-            transmitByteSink: consoleTransmitSink,
-            autoCarriageReturnWhenIdle: true));
+            transmitByteSink: consoleTransmitSink));
         return mappedBus;
     }
 }
