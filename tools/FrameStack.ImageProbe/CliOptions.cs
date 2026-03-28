@@ -126,6 +126,11 @@ internal static class CliOptions
         Description = "Maximum number of supervisor trace events to keep.",
     };
 
+    internal static readonly Option<bool> SupervisorTraceIncludePutCharacter = new("--svc-trace-include-putc")
+    {
+        Description = "Include service 0x01 (putchar) calls in supervisor trace.",
+    };
+
     internal static readonly Option<string[]> StopOnSupervisorSignatures = CreateManyValueOption(
         "--stop-on-svc-signature",
         "Stop on supervisor signature <service>@<caller>/<a0>/<a1>/<a2>/<a3>.");
@@ -170,6 +175,11 @@ internal static class CliOptions
     internal static readonly Option<bool> TraceWatch32Accesses = new("--trace-watch32-accesses")
     {
         Description = "Trace accesses for watched words.",
+    };
+
+    internal static readonly Option<bool> TraceWatch32AllAddresses = new("--trace-watch32-all")
+    {
+        Description = "Trace accesses for all addresses (PC-range filter still applies).",
     };
 
     internal static readonly Option<int?> TraceWatch32AccessesMaxEvents = new("--trace-watch32-accesses-max")

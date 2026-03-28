@@ -3,30 +3,35 @@ namespace FrameStack.Emulation.PowerPc32;
 public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCallHandler
 {
     private const uint QueryInstalledRamService = 0x04;
+    private const uint QueryHardwareProfileService = 0x07;
     private const uint BootstrapIoMemoryProfileService = 0x2C;
     private const uint QueryIoMemoryProfileService = 0x3A;
     private const uint SetIoMemoryProfileService = 0x3B;
     private const uint ReadIoMemoryProfileService = 0x3C;
     private const uint StageIoMemoryProfileService = 0x3D;
     private const uint CommitIoMemoryProfileService = 0x3E;
+    private const uint IoMemoryProfileEncodingBase = 100;
     private const uint DefaultReportedMemoryBytes = 64u * 1024u * 1024u;
     private const uint DefaultIoMemoryProfilePercent = 20;
-    private const uint MaxIoMemoryProfileValue = 125;
+    private const uint MaxIoMemoryProfilePercent = 25;
     private const uint IoMemoryDescriptorTimingClassWord = 0x0000_8000;
     private const uint IoMemoryDescriptorAdapterCodeWord = 0x0091_0091;
     private const uint IoMemorySizingProbeBytes = 0x0040_0000;
 
     private readonly uint _reportedMemoryBytes;
     private readonly uint _defaultIoMemoryProfilePercent;
+    private readonly uint _hardwarePlatformId;
     private uint _manualIoMemoryProfilePercent;
     private bool _hasManualIoMemoryProfile;
 
     public DefaultPowerPcSupervisorCallHandler(
         uint reportedMemoryBytes = DefaultReportedMemoryBytes,
-        uint defaultIoMemoryProfilePercent = DefaultIoMemoryProfilePercent)
+        uint defaultIoMemoryProfilePercent = DefaultIoMemoryProfilePercent,
+        uint hardwarePlatformId = 0)
     {
         _reportedMemoryBytes = reportedMemoryBytes;
         _defaultIoMemoryProfilePercent = NormalizeIoMemoryProfile(defaultIoMemoryProfilePercent);
+        _hardwarePlatformId = hardwarePlatformId;
         _manualIoMemoryProfilePercent = _defaultIoMemoryProfilePercent;
         _hasManualIoMemoryProfile = false;
     }
@@ -44,8 +49,6 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
                 context.Argument2 >= 0x8000_0000 &&
                 context.Argument3 == 0)
             {
-                // IOS probes this path as an allocation-status query and expects
-                // a zero success code, not the requested byte count.
                 return new PowerPcSupervisorCallResult(ReturnValue: 0);
             }
 
@@ -61,9 +64,24 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
             return new PowerPcSupervisorCallResult(ReturnValue: _reportedMemoryBytes);
         }
 
+        if (context.ServiceCode == QueryHardwareProfileService)
+        {
+            if (_hardwarePlatformId != 0 &&
+                context.Argument0 == 0 &&
+                context.Argument1 == 0 &&
+                context.Argument2 != 0 &&
+                context.Argument3 != 0)
+            {
+                return new PowerPcSupervisorCallResult(ReturnValue: _hardwarePlatformId);
+            }
+
+            return new PowerPcSupervisorCallResult(ReturnValue: 0);
+        }
+
         if (context.ServiceCode == BootstrapIoMemoryProfileService)
         {
-            SeedIoMemoryProfileBlock(context, ResolveIoMemoryProfileResponse());
+            var bootstrapProfile = ResolveIoMemoryProfileQueryResponse();
+            SeedIoMemoryProfileBlock(context, bootstrapProfile);
             return new PowerPcSupervisorCallResult(ReturnValue: 0);
         }
 
@@ -81,7 +99,16 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         {
             if (context.Argument0 != 0)
             {
-                _manualIoMemoryProfilePercent = NormalizeIoMemoryProfile(context.Argument0);
+                var normalizedProfile = NormalizeIoMemoryProfile(context.Argument0);
+
+                if (normalizedProfile == 0)
+                {
+                    _manualIoMemoryProfilePercent = _defaultIoMemoryProfilePercent;
+                    _hasManualIoMemoryProfile = false;
+                    return new PowerPcSupervisorCallResult(ReturnValue: 0);
+                }
+
+                _manualIoMemoryProfilePercent = normalizedProfile;
                 _hasManualIoMemoryProfile = true;
                 return new PowerPcSupervisorCallResult(
                     ReturnValue: EncodeIoMemoryProfile(_manualIoMemoryProfilePercent));
@@ -123,13 +150,6 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
         context.TryWriteDataUInt32(context.Argument0 + 12, IoMemoryDescriptorAdapterCodeWord);
     }
 
-    private uint ResolveIoMemoryProfileResponse()
-    {
-        return _hasManualIoMemoryProfile
-            ? EncodeIoMemoryProfile(_manualIoMemoryProfilePercent)
-            : 0u;
-    }
-
     private uint ResolveIoMemoryProfileQueryResponse()
     {
         var activePercent = _hasManualIoMemoryProfile
@@ -141,12 +161,17 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
 
     private static uint EncodeIoMemoryProfile(uint ioMemoryProfilePercent)
     {
-        return ioMemoryProfilePercent;
+        if (ioMemoryProfilePercent == 0)
+        {
+            return 0;
+        }
+
+        return IoMemoryProfileEncodingBase + ioMemoryProfilePercent;
     }
 
     private static uint NormalizeIoMemoryProfile(uint rawValue)
     {
-        if (rawValue > MaxIoMemoryProfileValue)
+        if (rawValue > MaxIoMemoryProfilePercent)
         {
             return 0;
         }

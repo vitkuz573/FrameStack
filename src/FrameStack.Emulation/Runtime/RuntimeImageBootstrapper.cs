@@ -10,7 +10,9 @@ namespace FrameStack.Emulation.Runtime;
 public sealed class RuntimeImageBootstrapper
 {
     private const uint OneMbInBytes = 1024u * 1024u;
-    private const uint CiscoC2600BootMode = 1;
+    private const int CiscoC2600MaxReportedMemoryMb = 128;
+    private const uint CiscoC2600BootMode = 2;
+    private const uint CiscoC2600HardwarePlatformId = 0x2B;
     private const uint CiscoC2600BootInfoPointer = 0x8000_BD00;
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
     private const uint CiscoC2600IoMemoryDescriptorAddress = 0x8336_67E0;
@@ -31,7 +33,8 @@ public sealed class RuntimeImageBootstrapper
         string runtimeHandle,
         byte[] imageBytes,
         int memoryMb,
-        Action<FrameStack.Emulation.Abstractions.ICpuCore>? cpuInitializer = null)
+        Action<FrameStack.Emulation.Abstractions.ICpuCore>? cpuInitializer = null,
+        Action<byte>? consoleTransmitSink = null)
     {
         if (memoryMb <= 0)
         {
@@ -50,7 +53,7 @@ public sealed class RuntimeImageBootstrapper
         }
 
         ApplyCiscoMemoryWriteProtection(ramBus, inspection);
-        var machineMemoryBus = BuildMachineMemoryBus(ramBus, inspection);
+        var machineMemoryBus = BuildMachineMemoryBus(ramBus, inspection, consoleTransmitSink);
 
         var lowVectorEntryStubInstalled =
             CiscoPowerPcLowVectorBootstrap.TryInstallEntryStub(machineMemoryBus, inspection, loadedImage.EntryPoint);
@@ -108,12 +111,14 @@ public sealed class RuntimeImageBootstrapper
         if (loadedImage.Architecture == ImageArchitecture.PowerPc32 &&
             loadedImage.Endianness == ImageEndianness.BigEndian)
         {
-            var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb);
+            var reportedMemoryBytes = ResolvePowerPcReportedMemoryBytes(memoryMb, inspection);
             var nullProgramCounterRedirectPolicy =
                 ResolvePowerPcNullProgramCounterRedirectPolicy(loadedImage, inspection);
 
             return new PowerPc32CpuCore(
-                new DefaultPowerPcSupervisorCallHandler(reportedMemoryBytes),
+                new DefaultPowerPcSupervisorCallHandler(
+                    reportedMemoryBytes: reportedMemoryBytes,
+                    hardwarePlatformId: ResolvePowerPcHardwarePlatformId(inspection)),
                 nullProgramCounterRedirectPolicy);
         }
 
@@ -121,9 +126,21 @@ public sealed class RuntimeImageBootstrapper
             $"Unsupported architecture/endian pair: {loadedImage.Architecture}/{loadedImage.Endianness}.");
     }
 
-    private static uint ResolvePowerPcReportedMemoryBytes(int memoryMb)
+    private static uint ResolvePowerPcReportedMemoryBytes(
+        int memoryMb,
+        ImageInspectionResult inspection)
     {
-        return checked((uint)memoryMb * OneMbInBytes);
+        var effectiveMemoryMb = memoryMb;
+
+        if (string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase) &&
+            effectiveMemoryMb > CiscoC2600MaxReportedMemoryMb)
+        {
+            // C2600 ROM TLB bootstrap expects at most 128MB and falls into a
+            // non-recoverable guard loop when probing larger RAM profiles.
+            effectiveMemoryMb = CiscoC2600MaxReportedMemoryMb;
+        }
+
+        return checked((uint)effectiveMemoryMb * OneMbInBytes);
     }
 
     private static CiscoPowerPcNullProgramCounterRedirectPolicy? ResolvePowerPcNullProgramCounterRedirectPolicy(
@@ -133,6 +150,16 @@ public sealed class RuntimeImageBootstrapper
         return string.IsNullOrWhiteSpace(inspection.CiscoFamily)
             ? null
             : new CiscoPowerPcNullProgramCounterRedirectPolicy(loadedImage.EntryPoint);
+    }
+
+    private static uint ResolvePowerPcHardwarePlatformId(ImageInspectionResult inspection)
+    {
+        if (string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
+        {
+            return CiscoC2600HardwarePlatformId;
+        }
+
+        return 0;
     }
 
     private static void ApplyDefaultCpuInitialization(
@@ -168,7 +195,7 @@ public sealed class RuntimeImageBootstrapper
         }
 
         const uint stackGuardBytes = 0x1000;
-        var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb);
+        var topOfRam = ResolvePowerPcReportedMemoryBytes(memoryMb, inspection);
 
         return topOfRam > stackGuardBytes
             ? topOfRam - stackGuardBytes
@@ -215,7 +242,8 @@ public sealed class RuntimeImageBootstrapper
 
     private static IMemoryBus BuildMachineMemoryBus(
         SparseMemoryBus ramBus,
-        ImageInspectionResult inspection)
+        ImageInspectionResult inspection,
+        Action<byte>? consoleTransmitSink)
     {
         if (!string.Equals(inspection.CiscoFamily, "C2600", StringComparison.OrdinalIgnoreCase))
         {
@@ -223,7 +251,9 @@ public sealed class RuntimeImageBootstrapper
         }
 
         var mappedBus = new MemoryMappedBus(ramBus);
+        mappedBus.RegisterDevice(new CiscoC2600Amdp2IoDevice());
         mappedBus.RegisterDevice(new CiscoC2600PortAdapterIoDevice());
+        mappedBus.RegisterDevice(new CiscoC2600ConsoleUartIoDevice(transmitByteSink: consoleTransmitSink));
         return mappedBus;
     }
 }

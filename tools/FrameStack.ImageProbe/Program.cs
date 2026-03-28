@@ -107,6 +107,11 @@ if (cliOptions.SupervisorTraceMaxEvents != 4096)
     Console.WriteLine($"SupervisorTraceMaxEvents: {cliOptions.SupervisorTraceMaxEvents}");
 }
 
+if (cliOptions.SupervisorTraceIncludePutCharacter)
+{
+    Console.WriteLine("SupervisorTraceIncludePutCharacter: True");
+}
+
 if (cliOptions.StopOnSupervisorSignatures.Count > 0)
 {
     Console.WriteLine(
@@ -169,6 +174,11 @@ if (cliOptions.StopOnWatchWordChangeEffectiveAddresses.Count > 0)
 if (cliOptions.TraceWatch32Accesses)
 {
     Console.WriteLine("TraceWatch32Accesses: True");
+    if (cliOptions.TraceWatch32AllAddresses)
+    {
+        Console.WriteLine("TraceWatch32AllAddresses: True");
+    }
+
     Console.WriteLine($"TraceWatch32AccessesMax: {cliOptions.TraceWatch32AccessesMaxEvents}");
 }
 
@@ -365,7 +375,8 @@ try
 
         supervisorTracer = new PowerPcTracingSupervisorCallHandler(
             powerPcCore.SupervisorCallHandler,
-            cliOptions.SupervisorTraceMaxEvents);
+            cliOptions.SupervisorTraceMaxEvents,
+            includePutCharacterInTrace: cliOptions.SupervisorTraceIncludePutCharacter);
         IPowerPcSupervisorCallHandler activeSupervisorHandler = supervisorTracer;
 
         if (cliOptions.StopOnSupervisorService.HasValue)
@@ -472,6 +483,7 @@ try
         cliOptions.DynamicStopOnWatchWordChangeRequests,
         cliOptions.StopOnWatchWordChangeEffectiveAddresses,
         cliOptions.TraceWatch32Accesses,
+        cliOptions.TraceWatch32AllAddresses,
         cliOptions.TraceWatch32AccessesMaxEvents,
         cliOptions.TraceWatch32ProgramCounterRanges,
         cliOptions.TraceInstructionProgramCounterRanges,
@@ -1349,6 +1361,7 @@ static TracedRunResult RunBudgetWithTrace(
     IReadOnlyList<DynamicWatchWordRequest> dynamicStopOnWatchWordChangeRequests,
     IReadOnlyList<uint> stopOnWatchWordChangeEffectiveAddresses,
     bool traceWatchWordAccesses,
+    bool traceWatchWordAllAddresses,
     int traceWatchWordAccessesMaxEvents,
     IReadOnlyList<AddressRange> traceWatchWordProgramCounterRanges,
     IReadOnlyList<AddressRange> traceInstructionProgramCounterRanges,
@@ -1437,14 +1450,17 @@ static TracedRunResult RunBudgetWithTrace(
             : null;
         IReadOnlyList<AddressRange>? traceWatchAddressRanges = null;
         Action<PowerPcMemoryAccessTraceEntry>? priorMemoryTraceSink = null;
+        var traceAllAddresses = traceWatchWordAllAddresses;
         var canTraceMemoryAccesses = powerPcCore is not null &&
                                      memoryAccessEvents is not null &&
                                      memoryAccessEvents.Count < traceWatchWordAccessesMaxEvents &&
-                                     currentTraceWatchWordAddresses.Length > 0;
+                                     (traceAllAddresses || currentTraceWatchWordAddresses.Length > 0);
 
         if (canTraceMemoryAccesses)
         {
-            traceWatchAddressRanges = BuildWordWatchRanges(currentTraceWatchWordAddresses);
+            traceWatchAddressRanges = traceAllAddresses
+                ? null
+                : BuildWordWatchRanges(currentTraceWatchWordAddresses);
             priorMemoryTraceSink = powerPcCore!.MemoryAccessTraceSink;
             powerPcCore.MemoryAccessTraceSink = accessEntry =>
             {
@@ -1453,7 +1469,8 @@ static TracedRunResult RunBudgetWithTrace(
                     return;
                 }
 
-                if (!IsMemoryAccessWithinRanges(
+                if (traceWatchAddressRanges is not null &&
+                    !IsMemoryAccessWithinRanges(
                         accessEntry.PhysicalAddress,
                         accessEntry.SizeBytes,
                         traceWatchAddressRanges))
@@ -3649,6 +3666,7 @@ sealed record ProbeCliOptions(
     IReadOnlyDictionary<uint, long> StopAtProgramCounterHits,
     uint? StopOnSupervisorService,
     int SupervisorTraceMaxEvents,
+    bool SupervisorTraceIncludePutCharacter,
     IReadOnlySet<SupervisorCallSignatureKey> StopOnSupervisorSignatures,
     IReadOnlyDictionary<SupervisorCallSignatureKey, int> StopOnSupervisorSignatureHits,
     int TailLength,
@@ -3665,6 +3683,7 @@ sealed record ProbeCliOptions(
     IReadOnlyList<DynamicWatchWordRequest> DynamicStopOnWatchWordChangeRequests,
     IReadOnlyList<uint> StopOnWatchWordChangeEffectiveAddresses,
     bool TraceWatch32Accesses,
+    bool TraceWatch32AllAddresses,
     int TraceWatch32AccessesMaxEvents,
     IReadOnlyList<AddressRange> TraceWatch32ProgramCounterRanges,
     IReadOnlyList<AddressRange> TraceInstructionProgramCounterRanges,

@@ -162,6 +162,105 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void RfiShouldRestoreMachineStateAndProgramCounterFromSrrRegisters()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x4C00_0064); // rfi
+
+        cpu.Reset(0x1000);
+        cpu.WriteSpecialPurposeRegister(26, 0x1234_567A); // SRR0
+        cpu.WriteSpecialPurposeRegister(27, 0x0000_0030); // SRR1
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1234_5678u, cpu.ProgramCounter);
+        Assert.Equal(0x0000_0030u, cpu.MachineStateRegister);
+    }
+
+    [Fact]
+    public void DecrementerUnderflowShouldTakeExceptionWhenExternalInterruptsAreEnabled()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x3860_0001); // li r3, 1
+
+        cpu.Reset(0x1000);
+        cpu.WriteMachineStateRegister(0x0000_8030); // EE|IR|DR set
+        cpu.WriteSpecialPurposeRegister(22, 0x0000_0000); // DEC
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0000_0900u, cpu.ProgramCounter);
+        Assert.Equal(0x0000_1000u, cpu.ReadSpecialPurposeRegister(26)); // SRR0
+        Assert.Equal(0x0000_8030u, cpu.ReadSpecialPurposeRegister(27)); // SRR1
+        Assert.Equal(0u, cpu.Registers[3]); // original instruction must not execute
+        Assert.Equal(0x0000_0000u, cpu.MachineStateRegister & 0x0000_8030u); // EE/IR/DR cleared
+    }
+
+    [Fact]
+    public void PendingDecrementerInterruptShouldWaitUntilExternalInterruptsAreEnabled()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x3860_0001); // li r3, 1
+        memory.WriteUInt32(0x1004, 0x3880_0002); // li r4, 2
+
+        cpu.Reset(0x1000);
+        cpu.WriteMachineStateRegister(0x0000_0030); // EE cleared, IR|DR set
+        cpu.WriteSpecialPurposeRegister(22, 0x0000_0000); // DEC
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+        Assert.Equal(1u, cpu.Registers[3]);
+
+        cpu.WriteMachineStateRegister(0x0000_8030); // enable EE
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0000_0900u, cpu.ProgramCounter);
+        Assert.Equal(0x0000_1004u, cpu.ReadSpecialPurposeRegister(26)); // SRR0
+        Assert.Equal(0u, cpu.Registers[4]); // second instruction must not execute
+    }
+
+    [Fact]
+    public void CrorShouldSetTargetConditionBitWhenEitherInputBitIsSet()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x4FFE_E382); // cror 31, 30, 28
+
+        cpu.Reset(0x1000);
+        cpu.Registers.Cr = 0x0000_0002; // bit30=1, bit28=0
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0000_0003u, cpu.Registers.Cr); // bit31 set from OR result
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void CrorShouldClearTargetConditionBitWhenBothInputBitsAreClear()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x4FFE_E382); // cror 31, 30, 28
+
+        cpu.Reset(0x1000);
+        cpu.Registers.Cr = 0x0000_0001; // bit31=1 while inputs are clear
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0000_0000u, cpu.Registers.Cr); // target bit replaced with OR result (0)
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
     public void CmplwShouldWriteSelectedConditionRegisterField()
     {
         var cpu = new PowerPc32CpuCore();
@@ -202,6 +301,24 @@ public sealed class PowerPc32CpuCoreTests
         Assert.Equal(0u, cpu.Registers[5]);
         Assert.Equal(2u, cpu.Registers[6]);
         Assert.Equal(0x1010u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void RlwnmShouldRotateUsingRegisterShiftAmount()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x5C63_003E); // rlwnm r3, r3, r0, 0, 31
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x1234_5678;
+        cpu.Registers[0] = 4;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x2345_6781u, cpu.Registers[3]);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
     }
 
     [Fact]
@@ -335,6 +452,87 @@ public sealed class PowerPc32CpuCoreTests
 
         Assert.Equal(0u, cpu.Registers[5]);
         Assert.Equal(0x2000_0000u, cpu.Registers.Xer & 0x2000_0000u);
+    }
+
+    [Fact]
+    public void SubfzeShouldUseCarryInAndUpdateCarryFlag()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x30E0_0001); // addic r7, r0, 1
+        memory.WriteUInt32(0x1004, 0x7CA3_0190); // subfze r5, r3
+
+        cpu.Reset(0x1000);
+        cpu.Registers[0] = 0xFFFF_FFFF;
+        cpu.Registers[3] = 0x0000_0010;
+
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xFFFF_FFF0u, cpu.Registers[5]);
+        Assert.Equal(0u, cpu.Registers.Xer & 0x2000_0000u);
+    }
+
+    [Fact]
+    public void SubfzeDotShouldUpdateCr0FromResult()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x30E0_0001); // addic r7, r0, 1
+        memory.WriteUInt32(0x1004, 0x7CA3_0191); // subfze. r5, r3
+
+        cpu.Reset(0x1000);
+        cpu.Registers[0] = 0xFFFF_FFFF;
+        cpu.Registers[3] = 0;
+
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0u, cpu.Registers[5]);
+        Assert.Equal(0b0010u, (cpu.Registers.Cr >> 28) & 0xFu);
+    }
+
+    [Fact]
+    public void LwarxAndStwcxShouldStoreReservedWordAndSetCr0Equal()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0x7C80_1828); // lwarx r4, 0, r3
+        memory.WriteUInt32(0x1004, 0x7CA0_192D); // stwcx. r5, 0, r3
+        memory.WriteUInt32(0x2000, 0x1122_3344);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x2000;
+        cpu.Registers[5] = 0xAABB_CCDD;
+
+        cpu.ExecuteCycle(memory);
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1122_3344u, cpu.Registers[4]);
+        Assert.Equal(0xAABB_CCDDu, memory.ReadUInt32(0x2000));
+        Assert.Equal(0b0010u, (cpu.Registers.Cr >> 28) & 0xFu);
+    }
+
+    [Fact]
+    public void StwcxShouldFailWithoutReservationAndLeaveMemoryUnchanged()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0x7CA0_192D); // stwcx. r5, 0, r3
+        memory.WriteUInt32(0x2000, 0x1122_3344);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x2000;
+        cpu.Registers[5] = 0xAABB_CCDD;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1122_3344u, memory.ReadUInt32(0x2000));
+        Assert.Equal(0u, (cpu.Registers.Cr >> 28) & 0xFu);
     }
 
     [Fact]
@@ -514,14 +712,9 @@ public sealed class PowerPc32CpuCoreTests
 
         cpu.ExecuteCycle(memory);
 
-        for (var address = 0x1010u; address < 0x1020u; address++)
+        for (var address = 0x1000u; address < 0x1020u; address++)
         {
             Assert.Equal(0u, memory.ReadByte(address));
-        }
-
-        for (var address = 0x1000u; address < 0x1010u; address++)
-        {
-            Assert.Equal(0xAAu, memory.ReadByte(address));
         }
 
         for (var address = 0x1020u; address < 0x1040u; address++)
@@ -1020,6 +1213,105 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void LbzuxShouldLoadByteAndUpdateBaseRegister()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0x7C1F_18EE); // lbzux r0, r31, r3
+        memory.WriteByte(0x1205, 0xAB);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[31] = 0x1200;
+        cpu.Registers[3] = 0x0005;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xABu, cpu.Registers[0]);
+        Assert.Equal(0x1205u, cpu.Registers[31]);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void LhaShouldSignExtendLoadedHalfWord()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0xA883_0000); // lha r4, 0(r3)
+        memory.WriteByte(0x1200, 0xFF);
+        memory.WriteByte(0x1201, 0x80);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x1200;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xFFFF_FF80u, cpu.Registers[4]);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void LhzuShouldLoadHalfWordAndUpdateBaseRegister()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0xA483_0002); // lhzu r4, 2(r3)
+        memory.WriteByte(0x1202, 0x12);
+        memory.WriteByte(0x1203, 0x34);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x1200;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x1234u, cpu.Registers[4]);
+        Assert.Equal(0x1202u, cpu.Registers[3]);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void LhauShouldSignExtendAndUpdateBaseRegister()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0xAC83_0002); // lhau r4, 2(r3)
+        memory.WriteByte(0x1202, 0xFF);
+        memory.WriteByte(0x1203, 0x00);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x1200;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xFFFF_FF00u, cpu.Registers[4]);
+        Assert.Equal(0x1202u, cpu.Registers[3]);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
+    public void SthuShouldStoreHalfWordAndUpdateBaseRegister()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x4000);
+
+        memory.WriteUInt32(0x1000, 0xB483_0002); // sthu r4, 2(r3)
+
+        cpu.Reset(0x1000);
+        cpu.Registers[3] = 0x1200;
+        cpu.Registers[4] = 0xA1B2_C3D4;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xC3u, memory.ReadByte(0x1202));
+        Assert.Equal(0xD4u, memory.ReadByte(0x1203));
+        Assert.Equal(0x1202u, cpu.Registers[3]);
+        Assert.Equal(0x1004u, cpu.ProgramCounter);
+    }
+
+    [Fact]
     public void SnapshotRoundTripShouldRestoreCpuState()
     {
         var sourceCpu = new PowerPc32CpuCore();
@@ -1158,6 +1450,29 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void TrapInstructionsShouldAdvanceProgramCounterWithoutHalting()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x0800_0000); // tdi
+        memory.WriteUInt32(0x1004, 0x0C00_0000); // twi
+        memory.WriteUInt32(0x1008, 0x7FE1_0808); // tw 31, r1, r1
+        memory.WriteUInt32(0x100C, 0x3860_0001); // li r3, 1
+
+        cpu.Reset(0x1000);
+
+        for (var step = 0; step < 4; step++)
+        {
+            cpu.ExecuteCycle(memory);
+        }
+
+        Assert.False(cpu.Halted);
+        Assert.Equal(0x1010u, cpu.ProgramCounter);
+        Assert.Equal(1u, cpu.Registers[3]);
+    }
+
+    [Fact]
     public void SystemCallContextShouldExposeDataMemoryCallbacks()
     {
         var handler = new CallbackSupervisorCallHandler(context =>
@@ -1256,6 +1571,56 @@ public sealed class PowerPc32CpuCoreTests
     }
 
     [Fact]
+    public void ExtsbRecordFormShouldUpdateCr0AndPreventBneForZeroResult()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x3860_0000); // li r3, 0
+        memory.WriteUInt32(0x1004, 0x7C63_0775); // extsb. r3, r3
+        memory.WriteUInt32(0x1008, 0x4082_000C); // bne 0x1014
+        memory.WriteUInt32(0x100C, 0x3880_0001); // li r4, 1
+        memory.WriteUInt32(0x1010, 0x4800_0008); // b 0x1018
+        memory.WriteUInt32(0x1014, 0x3880_0002); // li r4, 2
+
+        cpu.Reset(0x1000);
+
+        for (var step = 0; step < 5; step++)
+        {
+            cpu.ExecuteCycle(memory);
+        }
+
+        Assert.Equal(0x1u, cpu.Registers[4]);
+        Assert.Equal(0x1018u, cpu.ProgramCounter);
+        Assert.Equal(0x2000_0000u, cpu.Registers.Cr & 0xF000_0000u);
+    }
+
+    [Fact]
+    public void ExtshRecordFormShouldUpdateCr0AndPreventBneForZeroResult()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x3860_0000); // li r3, 0
+        memory.WriteUInt32(0x1004, 0x7C63_0735); // extsh. r3, r3
+        memory.WriteUInt32(0x1008, 0x4082_000C); // bne 0x1014
+        memory.WriteUInt32(0x100C, 0x3880_0001); // li r4, 1
+        memory.WriteUInt32(0x1010, 0x4800_0008); // b 0x1018
+        memory.WriteUInt32(0x1014, 0x3880_0002); // li r4, 2
+
+        cpu.Reset(0x1000);
+
+        for (var step = 0; step < 5; step++)
+        {
+            cpu.ExecuteCycle(memory);
+        }
+
+        Assert.Equal(0x1u, cpu.Registers[4]);
+        Assert.Equal(0x1018u, cpu.ProgramCounter);
+        Assert.Equal(0x2000_0000u, cpu.Registers.Cr & 0xF000_0000u);
+    }
+
+    [Fact]
     public void SrwiAliasViaRlwinmShouldShiftRightLogical()
     {
         var cpu = new PowerPc32CpuCore();
@@ -1319,6 +1684,135 @@ public sealed class PowerPc32CpuCoreTests
         cpu.ExecuteCycle(memory);
 
         Assert.Equal(0u, cpu.Registers[4]);
+    }
+
+    [Fact]
+    public void SrawShouldArithmeticShiftAndSetCarryWhenNegativeBitsAreShiftedOut()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7CA41830 + (uint)((792 - 24) << 1)); // sraw r4, r5, r3
+
+        cpu.Reset(0x1000);
+        cpu.Registers[5] = 0xF000_0001;
+        cpu.Registers[3] = 4;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xFF00_0000u, cpu.Registers[4]);
+        Assert.Equal(0x2000_0000u, cpu.Registers.Xer & 0x2000_0000u);
+    }
+
+    [Fact]
+    public void SrawShouldPreserveCarryWhenShiftAmountIsZero()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7CA41830 + (uint)((792 - 24) << 1)); // sraw r4, r5, r3
+
+        cpu.Reset(0x1000);
+        cpu.Registers.Xer = 0x2000_0000u;
+        cpu.Registers[5] = 0x8765_4321;
+        cpu.Registers[3] = 0;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x8765_4321u, cpu.Registers[4]);
+        Assert.Equal(0x2000_0000u, cpu.Registers.Xer & 0x2000_0000u);
+    }
+
+    [Fact]
+    public void SrawShouldSignFillAndSetCarryWhenShiftAmountIsAtLeastThirtyTwo()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7CA41830 + (uint)((792 - 24) << 1)); // sraw r4, r5, r3
+
+        cpu.Reset(0x1000);
+        cpu.Registers[5] = 0x8000_0001;
+        cpu.Registers[3] = 63;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xFFFF_FFFFu, cpu.Registers[4]);
+        Assert.Equal(0x2000_0000u, cpu.Registers.Xer & 0x2000_0000u);
+    }
+
+    [Fact]
+    public void OrcShouldOrWithComplementedRb()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7CA4_1B38); // orc r4, r5, r3
+
+        cpu.Reset(0x1000);
+        cpu.Registers[5] = 0x0F0F_0000;
+        cpu.Registers[3] = 0x00FF_00FF;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xFF0F_FF00u, cpu.Registers[4]);
+    }
+
+    [Fact]
+    public void OrcRecordFormShouldUpdateCr0()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7CA4_1B39); // orc. r4, r5, r3
+
+        cpu.Reset(0x1000);
+        cpu.Registers[5] = 0x0000_0000;
+        cpu.Registers[3] = 0xFFFF_FFFF;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0000_0000u, cpu.Registers[4]);
+        Assert.Equal(0x2000_0000u, cpu.Registers.Cr & 0xF000_0000u);
+    }
+
+    [Fact]
+    public void LhaxShouldLoadSignedHalfWordFromIndexedAddress()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7C85_1AAE); // lhax r4, r5, r3
+        memory.WriteByte(0x2010, 0xFF);
+        memory.WriteByte(0x2011, 0x80);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[5] = 0x2000;
+        cpu.Registers[3] = 0x10;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0xFFFF_FF80u, cpu.Registers[4]);
+    }
+
+    [Fact]
+    public void LhauxShouldUpdateBaseRegisterWithIndexedAddress()
+    {
+        var cpu = new PowerPc32CpuCore();
+        var memory = new ArrayMemoryBus(baseAddress: 0x1000, sizeBytes: 0x3000);
+
+        memory.WriteUInt32(0x1000, 0x7C85_1AEE); // lhaux r4, r5, r3
+        memory.WriteByte(0x2020, 0x12);
+        memory.WriteByte(0x2021, 0x34);
+
+        cpu.Reset(0x1000);
+        cpu.Registers[5] = 0x2000;
+        cpu.Registers[3] = 0x20;
+
+        cpu.ExecuteCycle(memory);
+
+        Assert.Equal(0x0000_1234u, cpu.Registers[4]);
+        Assert.Equal(0x0000_2020u, cpu.Registers[5]);
     }
 
     [Fact]

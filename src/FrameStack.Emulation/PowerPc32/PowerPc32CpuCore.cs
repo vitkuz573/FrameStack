@@ -9,6 +9,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const int LinkRegisterSpr = 8;
     private const int CounterRegisterSpr = 9;
     private const int DecrementerRegisterSpr = 22;
+    private const int SaveRestoreRegister0Spr = 26;
+    private const int SaveRestoreRegister1Spr = 27;
     private const int Mpc8xxInstructionControlSpr = 784;
     private const int Mpc8xxInstructionEpnSpr = 787;
     private const int Mpc8xxInstructionTableWalkControlSpr = 789;
@@ -31,12 +33,20 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const uint Mpc8xxPageSize8Mb = 0x0000_000C;
     private const uint Mpc8xxPageSize16KbFlag = 0x0000_0008;
 
-    private const uint DcbzLineSize = 16;
+    private const uint DcbzLineSize = 32;
 
     private const uint XerSoMask = 0x8000_0000;
     private const uint XerCaMask = 0x2000_0000;
+    private const uint MachineStateExternalInterruptEnableMask = 0x0000_8000;
+    private const uint MachineStateInterruptPrefixMask = 0x0000_0040;
     private const uint MachineStateDataRelocationMask = 0x0000_0010;
     private const uint MachineStateInstructionRelocationMask = 0x0000_0020;
+    private const uint DecrementerExceptionVectorOffset = 0x0000_0900;
+    private const uint DecrementerExceptionHighVectorBase = 0xFFF0_0000;
+    private const uint ExceptionMachineStateClearMask =
+        MachineStateExternalInterruptEnableMask |
+        MachineStateDataRelocationMask |
+        MachineStateInstructionRelocationMask;
     private const int MaxNullProgramCounterRedirectEvents = 64;
     private const int JitCodePageShift = 12;
     private const int JitCompileThreshold = 64;
@@ -61,9 +71,12 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private ulong _timeBaseCounter;
     private AddressTranslationCache _instructionTranslationCache;
     private AddressTranslationCache _dataTranslationCache;
+    private uint _reservationAddress;
     private uint _instructionTlbGeneration;
     private uint _dataTlbGeneration;
     private bool _preserveHighBitOn8MbTranslation = true;
+    private bool _hasReservation;
+    private bool _decrementerInterruptPending;
     private int _lastMpc8xxControlSpr = Mpc8xxDataControlSpr;
     private long _nullProgramCounterRedirectCount;
     private int _jitBlockSequence;
@@ -121,6 +134,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
         GetRequiredInstanceMethod(nameof(JitWriteSpecialPurposeRegister));
     private static readonly MethodInfo JitRotateLeftWordImmediateAndMaskMethod =
         GetRequiredInstanceMethod(nameof(JitRotateLeftWordImmediateAndMask));
+    private static readonly MethodInfo JitRotateLeftWordVariableAndMaskMethod =
+        GetRequiredInstanceMethod(nameof(JitRotateLeftWordVariableAndMask));
     private static readonly MethodInfo JitBranchConditionalMethod =
         GetRequiredInstanceMethod(nameof(JitBranchConditional));
     private static readonly MethodInfo JitBranchImmediateMethod =
@@ -232,6 +247,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         _registers.Pc = entryPoint;
         Halted = false;
+        _hasReservation = false;
+        _reservationAddress = 0;
+        _decrementerInterruptPending = false;
         InvalidateTranslationCaches();
     }
 
@@ -339,6 +357,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
             _supervisorCallCounters[serviceCode] = hits;
         }
 
+        _hasReservation = false;
+        _reservationAddress = 0;
+        _decrementerInterruptPending = false;
+
         unchecked
         {
             _instructionTlbGeneration++;
@@ -394,6 +416,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _timeBaseCounter++;
         TickDecrementer();
 
+        if (TryHandlePendingDecrementerInterrupt())
+        {
+            return;
+        }
+
         pc = _registers.Pc;
         var instructionWord = memoryBus.ReadUInt32(TranslateInstructionAddress(pc));
         var instruction = new PowerPcInstruction(instructionWord);
@@ -402,6 +429,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
         {
             case 2:
                 ExecuteTrapDoublewordImmediate();
+                break;
+            case 3:
+                ExecuteTrapWordImmediate();
                 break;
             case 7:
                 ExecuteMultiplyLowImmediate(instruction);
@@ -444,6 +474,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 break;
             case 21:
                 ExecuteRotateLeftWordImmediateAndMask(instruction);
+                break;
+            case 23:
+                ExecuteRotateLeftWordVariableAndMask(instruction);
                 break;
             case 24:
                 ExecuteOrImmediate(instruction);
@@ -493,8 +526,20 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case 40:
                 ExecuteLoadHalfWordAndZero(memoryBus, instruction, updateBase: false);
                 break;
+            case 41:
+                ExecuteLoadHalfWordAndZero(memoryBus, instruction, updateBase: true);
+                break;
+            case 42:
+                ExecuteLoadHalfWordAlgebraic(memoryBus, instruction, updateBase: false);
+                break;
+            case 43:
+                ExecuteLoadHalfWordAlgebraic(memoryBus, instruction, updateBase: true);
+                break;
             case 44:
                 ExecuteStoreHalfWord(memoryBus, instruction, updateBase: false);
+                break;
+            case 45:
+                ExecuteStoreHalfWord(memoryBus, instruction, updateBase: true);
                 break;
             case 46:
                 ExecuteLoadMultipleWords(memoryBus, instruction);
@@ -920,6 +965,18 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 il.Emit(OpCodes.Call, JitRotateLeftWordImmediateAndMaskMethod);
                 EmitJitInstructionCountIncrement(il, executedLocal);
                 return true;
+            case 23:
+                EmitJitInstructionPrefix(il, executedLocal);
+                il.Emit(OpCodes.Ldarg_0);
+                EmitLoadInt32(il, instruction.Ra);
+                EmitLoadInt32(il, instruction.Rs);
+                EmitLoadInt32(il, instruction.Rb);
+                EmitLoadInt32(il, instruction.MaskBegin);
+                EmitLoadInt32(il, instruction.MaskEnd);
+                EmitLoadBoolean(il, instruction.RecordCondition);
+                il.Emit(OpCodes.Call, JitRotateLeftWordVariableAndMaskMethod);
+                EmitJitInstructionCountIncrement(il, executedLocal);
+                return true;
             case 32:
                 EmitJitInstructionPrefix(il, executedLocal);
                 il.Emit(OpCodes.Ldarg_0);
@@ -1146,6 +1203,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private static void EmitJitInstructionPrefix(ILGenerator il, LocalBuilder executedLocal)
     {
         var executeLabel = il.DefineLabel();
+        var continueLabel = il.DefineLabel();
 
         il.Emit(OpCodes.Ldloc, executedLocal);
         il.Emit(OpCodes.Ldarg_2);
@@ -1156,6 +1214,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
         il.MarkLabel(executeLabel);
         il.Emit(OpCodes.Ldarg_0);
         il.Emit(OpCodes.Call, JitAdvanceTimeMethod);
+        il.Emit(OpCodes.Brfalse_S, continueLabel);
+        il.Emit(OpCodes.Ldloc, executedLocal);
+        il.Emit(OpCodes.Ret);
+        il.MarkLabel(continueLabel);
     }
 
     private static void EmitJitInstructionCountIncrement(ILGenerator il, LocalBuilder executedLocal)
@@ -1329,10 +1391,11 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
     }
 
-    private void JitAdvanceTime()
+    private bool JitAdvanceTime()
     {
         _timeBaseCounter++;
         TickDecrementer();
+        return TryHandlePendingDecrementerInterrupt();
     }
 
     private void JitAddImmediate(int rt, int ra, int simm, bool updateHigh)
@@ -1422,6 +1485,29 @@ public sealed class PowerPc32CpuCore : ICpuCore
         bool recordCondition)
     {
         var source = _registers[rs];
+        var rotated = RotateLeft(source, shift);
+        var mask = BuildMask(maskBegin, maskEnd);
+        var result = rotated & mask;
+        _registers[ra] = result;
+
+        if (recordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void JitRotateLeftWordVariableAndMask(
+        int ra,
+        int rs,
+        int rb,
+        int maskBegin,
+        int maskEnd,
+        bool recordCondition)
+    {
+        var source = _registers[rs];
+        var shift = (int)(_registers[rb] & 0x1F);
         var rotated = RotateLeft(source, shift);
         var mask = BuildMask(maskBegin, maskEnd);
         var result = rotated & mask;
@@ -1747,7 +1833,22 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private void ExecuteTrapDoublewordImmediate()
     {
         // Trap/exception model is not implemented yet.
-        Halted = true;
+        // Until program exceptions are modeled, treat trap instructions as no-ops.
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteTrapWordImmediate()
+    {
+        // Trap/exception model is not implemented yet.
+        // Until program exceptions are modeled, treat trap instructions as no-ops.
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteTrapWord()
+    {
+        // Trap/exception model is not implemented yet.
+        // Until program exceptions are modeled, treat trap instructions as no-ops.
+        _registers.Pc += 4;
     }
 
     private void ExecuteMultiplyLowImmediate(PowerPcInstruction instruction)
@@ -1924,6 +2025,15 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _registers.Pc += 4;
     }
 
+    private void ExecuteLoadHalfWordAlgebraic(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
+    {
+        var address = ComputeEffectiveAddress(instruction);
+        var value = unchecked((uint)(short)ReadDataUInt16(memoryBus, address));
+        _registers[instruction.Rt] = value;
+        UpdateBaseRegisterIfNeeded(instruction, updateBase, address);
+        _registers.Pc += 4;
+    }
+
     private void ExecuteStoreWord(IMemoryBus memoryBus, PowerPcInstruction instruction, bool updateBase)
     {
         var address = ComputeEffectiveAddress(instruction);
@@ -2086,6 +2196,39 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return ReadDataUInt16(memoryBus, ComputeIndexedAddress(instruction));
     }
 
+    private void ExecuteLoadWordAndReserve(IMemoryBus memoryBus, PowerPcInstruction instruction)
+    {
+        var effectiveAddress = ComputeIndexedAddress(instruction);
+        _registers[instruction.Rt] = ReadDataUInt32(memoryBus, effectiveAddress);
+        _reservationAddress = effectiveAddress;
+        _hasReservation = true;
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteStoreWordConditional(IMemoryBus memoryBus, PowerPcInstruction instruction)
+    {
+        var effectiveAddress = ComputeIndexedAddress(instruction);
+        var success = _hasReservation && _reservationAddress == effectiveAddress;
+
+        if (success)
+        {
+            WriteDataUInt32(memoryBus, effectiveAddress, _registers[instruction.Rs]);
+        }
+
+        _hasReservation = false;
+        _reservationAddress = 0;
+
+        uint crField = success ? 0b0010u : 0u;
+
+        if ((_registers.Xer & XerSoMask) != 0)
+        {
+            crField |= 0b0001u;
+        }
+
+        WriteCrField(0, crField);
+        _registers.Pc += 4;
+    }
+
     private void WriteIndexedWord(IMemoryBus memoryBus, PowerPcInstruction instruction)
     {
         WriteDataUInt32(memoryBus, ComputeIndexedAddress(instruction), _registers[instruction.Rs]);
@@ -2139,6 +2282,14 @@ public sealed class PowerPc32CpuCore : ICpuCore
     {
         switch (instruction.XO)
         {
+            case 0: // mcrf
+            {
+                var targetField = (int)((instruction.Word >> 23) & 0x7);
+                var sourceField = (int)((instruction.Word >> 18) & 0x7);
+                WriteCrField(targetField, ReadCrField(sourceField));
+                _registers.Pc += 4;
+                return;
+            }
             case 16: // bclr
             {
                 var shouldBranch = EvaluateBranchCondition(instruction, allowCtrDecrement: true);
@@ -2155,8 +2306,60 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
                 return;
             }
+            case 33: // crnor
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => !(left || right));
+                return;
+            case 50: // rfi
+            {
+                var restoredMachineState = _extendedSpr.GetValueOrDefault(
+                    SaveRestoreRegister1Spr,
+                    _machineStateRegister);
+                var restoredProgramCounter = _extendedSpr.GetValueOrDefault(
+                    SaveRestoreRegister0Spr,
+                    currentPc + 4) & 0xFFFF_FFFCu;
+                WriteMachineStateRegister(restoredMachineState);
+                _registers.Pc = restoredProgramCounter;
+                return;
+            }
+            case 129: // crandc
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => left && !right);
+                return;
             case 150: // isync
                 _registers.Pc += 4;
+                return;
+            case 193: // crxor
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => left ^ right);
+                return;
+            case 225: // crnand
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => !(left && right));
+                return;
+            case 257: // crand
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => left && right);
+                return;
+            case 289: // creqv
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => !(left ^ right));
+                return;
+            case 417: // crorc
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => left || !right);
+                return;
+            case 449: // cror
+                ExecuteConditionRegisterLogical(
+                    instruction,
+                    static (left, right) => left || right);
                 return;
             case 528: // bcctr
             {
@@ -2178,6 +2381,16 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 throw new NotSupportedException(
                     $"Unsupported PowerPC32 XL-form XO 0x{instruction.XO:X3} at PC=0x{currentPc:X8}, INSN=0x{instruction.Word:X8}.");
         }
+    }
+
+    private void ExecuteConditionRegisterLogical(
+        PowerPcInstruction instruction,
+        Func<bool, bool, bool> operation)
+    {
+        var left = GetConditionRegisterBit(instruction.Ra);
+        var right = GetConditionRegisterBit(instruction.Rb);
+        SetConditionRegisterBit(instruction.Rt, operation(left, right));
+        _registers.Pc += 4;
     }
 
     private bool EvaluateBranchCondition(PowerPcInstruction instruction, bool allowCtrDecrement)
@@ -2216,6 +2429,20 @@ public sealed class PowerPc32CpuCore : ICpuCore
         return ((_registers.Cr >> normalized) & 1u) != 0;
     }
 
+    private void SetConditionRegisterBit(int bitIndex, bool value)
+    {
+        var normalized = 31 - (bitIndex & 0x1F);
+        var mask = 1u << normalized;
+
+        if (value)
+        {
+            _registers.Cr |= mask;
+            return;
+        }
+
+        _registers.Cr &= ~mask;
+    }
+
     private void ExecuteRotateLeftWordImmediateThenMaskInsert(PowerPcInstruction instruction)
     {
         var source = _registers[instruction.Rs];
@@ -2250,6 +2477,24 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _registers.Pc += 4;
     }
 
+    private void ExecuteRotateLeftWordVariableAndMask(PowerPcInstruction instruction)
+    {
+        var source = _registers[instruction.Rs];
+        var shift = (int)(_registers[instruction.Rb] & 0x1F);
+        var rotated = RotateLeft(source, shift);
+        var mask = BuildMask(instruction.MaskBegin, instruction.MaskEnd);
+        var result = rotated & mask;
+
+        _registers[instruction.Ra] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
     private void ExecuteXForm(IMemoryBus memoryBus, PowerPcInstruction instruction, uint currentPc)
     {
         switch (instruction.XO)
@@ -2260,6 +2505,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
                     unchecked((int)_registers[instruction.Ra]),
                     unchecked((int)_registers[instruction.Rb]));
                 _registers.Pc += 4;
+                break;
+            case 4: // tw
+                ExecuteTrapWord();
                 break;
             case 10: // addc
                 ExecuteAddCarrying(instruction);
@@ -2274,10 +2522,26 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers[instruction.Rt] = _registers.Cr;
                 _registers.Pc += 4;
                 break;
+            case 20: // lwarx
+                ExecuteLoadWordAndReserve(memoryBus, instruction);
+                break;
             case 23: // lwzx
                 _registers[instruction.Rt] = ReadIndexedWord(memoryBus, instruction);
                 _registers.Pc += 4;
                 break;
+            case 55: // lwzux
+            {
+                var effectiveAddress = ComputeIndexedAddress(instruction);
+                _registers[instruction.Rt] = ReadDataUInt32(memoryBus, effectiveAddress);
+
+                if (instruction.Ra != 0)
+                {
+                    _registers[instruction.Ra] = effectiveAddress;
+                }
+
+                _registers.Pc += 4;
+                break;
+            }
             case 24: // slw
                 ExecuteShiftLeftWord(instruction);
                 break;
@@ -2307,6 +2571,19 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers[instruction.Rt] = ReadIndexedByte(memoryBus, instruction);
                 _registers.Pc += 4;
                 break;
+            case 119: // lbzux
+            {
+                var effectiveAddress = ComputeIndexedAddress(instruction);
+                _registers[instruction.Rt] = ReadDataByte(memoryBus, effectiveAddress);
+
+                if (instruction.Ra != 0)
+                {
+                    _registers[instruction.Ra] = effectiveAddress;
+                }
+
+                _registers.Pc += 4;
+                break;
+            }
             case 83: // mfmsr
                 _registers[instruction.Rt] = _machineStateRegister;
                 _registers.Pc += 4;
@@ -2327,12 +2604,31 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 WriteMachineStateRegister(_registers[instruction.Rs]);
                 _registers.Pc += 4;
                 break;
+            case 150: // stwcx.
+                ExecuteStoreWordConditional(memoryBus, instruction);
+                break;
             case 138: // adde
                 ExecuteAddExtended(instruction);
                 break;
             case 151: // stwx
                 WriteIndexedWord(memoryBus, instruction);
                 _registers.Pc += 4;
+                break;
+            case 183: // stwux
+            {
+                var effectiveAddress = ComputeIndexedAddress(instruction);
+                WriteDataUInt32(memoryBus, effectiveAddress, _registers[instruction.Rs]);
+
+                if (instruction.Ra != 0)
+                {
+                    _registers[instruction.Ra] = effectiveAddress;
+                }
+
+                _registers.Pc += 4;
+                break;
+            }
+            case 200: // subfze
+                ExecuteSubtractFromZeroExtended(instruction);
                 break;
             case 202: // addze
                 ExecuteAddToZeroExtended(instruction);
@@ -2341,6 +2637,19 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 WriteIndexedByte(memoryBus, instruction);
                 _registers.Pc += 4;
                 break;
+            case 247: // stbux
+            {
+                var effectiveAddress = ComputeIndexedAddress(instruction);
+                WriteDataByte(memoryBus, effectiveAddress, unchecked((byte)_registers[instruction.Rs]));
+
+                if (instruction.Ra != 0)
+                {
+                    _registers[instruction.Ra] = effectiveAddress;
+                }
+
+                _registers.Pc += 4;
+                break;
+            }
             case 234: // addme
                 ExecuteAddToMinusOneExtended(instruction);
                 break;
@@ -2362,6 +2671,19 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers[instruction.Rt] = ReadIndexedHalfWord(memoryBus, instruction);
                 _registers.Pc += 4;
                 break;
+            case 311: // lhzux
+            {
+                var effectiveAddress = ComputeIndexedAddress(instruction);
+                _registers[instruction.Rt] = ReadDataUInt16(memoryBus, effectiveAddress);
+
+                if (instruction.Ra != 0)
+                {
+                    _registers[instruction.Ra] = effectiveAddress;
+                }
+
+                _registers.Pc += 4;
+                break;
+            }
             case 316: // xor
                 ExecuteExclusiveOrRegister(instruction);
                 break;
@@ -2369,10 +2691,43 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 _registers[instruction.Rt] = ReadSpr(instruction.Spr);
                 _registers.Pc += 4;
                 break;
+            case 343: // lhax
+                _registers[instruction.Rt] = unchecked((uint)(short)ReadIndexedHalfWord(memoryBus, instruction));
+                _registers.Pc += 4;
+                break;
             case 407: // sthx
                 WriteIndexedHalfWord(memoryBus, instruction);
                 _registers.Pc += 4;
                 break;
+            case 375: // lhaux
+            {
+                var effectiveAddress = ComputeIndexedAddress(instruction);
+                _registers[instruction.Rt] = unchecked((uint)(short)ReadDataUInt16(memoryBus, effectiveAddress));
+
+                if (instruction.Ra != 0)
+                {
+                    _registers[instruction.Ra] = effectiveAddress;
+                }
+
+                _registers.Pc += 4;
+                break;
+            }
+            case 412: // orc
+                ExecuteOrWithComplement(instruction);
+                break;
+            case 439: // sthux
+            {
+                var effectiveAddress = ComputeIndexedAddress(instruction);
+                WriteDataUInt16(memoryBus, effectiveAddress, unchecked((ushort)_registers[instruction.Rs]));
+
+                if (instruction.Ra != 0)
+                {
+                    _registers[instruction.Ra] = effectiveAddress;
+                }
+
+                _registers.Pc += 4;
+                break;
+            }
             case 370: // tlbia
                 InvalidateAllMpc8xxTlbEntries();
                 _registers.Pc += 4;
@@ -2411,6 +2766,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
             case 854: // eieio
                 _registers.Pc += 4;
                 break;
+            case 792: // sraw
+                ExecuteShiftRightArithmeticWord(instruction);
+                break;
             case 824: // srawi
                 ExecuteShiftRightArithmeticImmediate(instruction);
                 break;
@@ -2418,16 +2776,34 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 ExecuteStoreStringWordImmediate(memoryBus, instruction);
                 break;
             case 922: // extsh
-                _registers[instruction.Ra] = unchecked((uint)(short)(_registers[instruction.Rs] & 0xFFFF));
+            {
+                var result = unchecked((uint)(short)(_registers[instruction.Rs] & 0xFFFF));
+                _registers[instruction.Ra] = result;
+
+                if (instruction.RecordCondition)
+                {
+                    SetCr0FromResult(result);
+                }
+
                 _registers.Pc += 4;
                 break;
+            }
             case 982: // icbi
                 _registers.Pc += 4;
                 break;
             case 954: // extsb
-                _registers[instruction.Ra] = unchecked((uint)(sbyte)(_registers[instruction.Rs] & 0xFF));
+            {
+                var result = unchecked((uint)(sbyte)(_registers[instruction.Rs] & 0xFF));
+                _registers[instruction.Ra] = result;
+
+                if (instruction.RecordCondition)
+                {
+                    SetCr0FromResult(result);
+                }
+
                 _registers.Pc += 4;
                 break;
+            }
             case 1014: // dcbz
                 ExecuteDataCacheBlockSetToZero(memoryBus, instruction);
                 break;
@@ -2571,6 +2947,19 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _registers.Pc += 4;
     }
 
+    private void ExecuteOrWithComplement(PowerPcInstruction instruction)
+    {
+        var result = _registers[instruction.Rs] | ~_registers[instruction.Rb];
+        _registers[instruction.Ra] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
     private void ExecuteNor(PowerPcInstruction instruction)
     {
         var result = ~(_registers[instruction.Rs] | _registers[instruction.Rb]);
@@ -2633,6 +3022,47 @@ public sealed class PowerPc32CpuCore : ICpuCore
         var result = shift >= 32
             ? 0u
             : _registers[instruction.Rs] >> (int)shift;
+
+        _registers[instruction.Ra] = result;
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
+    private void ExecuteShiftRightArithmeticWord(PowerPcInstruction instruction)
+    {
+        var shift = _registers[instruction.Rb] & 0x3F;
+        var sourceRaw = _registers[instruction.Rs];
+        var source = unchecked((int)sourceRaw);
+        uint result;
+
+        if ((shift & 0x20) != 0)
+        {
+            result = source < 0 ? uint.MaxValue : 0u;
+            SetCarryFlag(source < 0);
+        }
+        else
+        {
+            var amount = (int)(shift & 0x1F);
+            var shifted = amount == 0 ? source : source >> amount;
+            result = unchecked((uint)shifted);
+
+            if (amount == 0)
+            {
+                // CA is unchanged for zero-shift sraw.
+            }
+            else
+            {
+                var shiftedOutMask = (1u << amount) - 1;
+                var shiftedOut = sourceRaw & shiftedOutMask;
+                var carry = source < 0 && shiftedOut != 0;
+                SetCarryFlag(carry);
+            }
+        }
 
         _registers[instruction.Ra] = result;
 
@@ -2817,6 +3247,22 @@ public sealed class PowerPc32CpuCore : ICpuCore
         _registers.Pc += 4;
     }
 
+    private void ExecuteSubtractFromZeroExtended(PowerPcInstruction instruction)
+    {
+        var carryIn = GetCarryFlag() ? 1UL : 0UL;
+        var sum = (ulong)~_registers[instruction.Ra] + carryIn;
+        var result = unchecked((uint)sum);
+        _registers[instruction.Rt] = result;
+        SetCarryFlag((sum >> 32) != 0);
+
+        if (instruction.RecordCondition)
+        {
+            SetCr0FromResult(result);
+        }
+
+        _registers.Pc += 4;
+    }
+
     private void ExecuteAddToMinusOneExtended(PowerPcInstruction instruction)
     {
         var carryIn = GetCarryFlag() ? 1UL : 0UL;
@@ -2853,8 +3299,41 @@ public sealed class PowerPc32CpuCore : ICpuCore
             return;
         }
 
+        var nextValue = unchecked(decrementerValue - 1);
+
         // DEC decrements continuously and wraps on underflow.
-        _extendedSpr[DecrementerRegisterSpr] = unchecked(decrementerValue - 1);
+        _extendedSpr[DecrementerRegisterSpr] = nextValue;
+
+        // MPC8xx decremeter interrupt latches when DEC transitions from non-negative to negative.
+        if ((decrementerValue & 0x8000_0000u) == 0 &&
+            (nextValue & 0x8000_0000u) != 0)
+        {
+            _decrementerInterruptPending = true;
+        }
+    }
+
+    private bool TryHandlePendingDecrementerInterrupt()
+    {
+        if (!_decrementerInterruptPending ||
+            (_machineStateRegister & MachineStateExternalInterruptEnableMask) == 0)
+        {
+            return false;
+        }
+
+        var savedPc = _registers.Pc;
+        var savedMachineState = _machineStateRegister;
+        var vectorBase = (savedMachineState & MachineStateInterruptPrefixMask) != 0
+            ? DecrementerExceptionHighVectorBase
+            : 0u;
+
+        _extendedSpr[SaveRestoreRegister0Spr] = savedPc;
+        _extendedSpr[SaveRestoreRegister1Spr] = savedMachineState;
+        _machineStateRegister = savedMachineState & ~ExceptionMachineStateClearMask;
+        _decrementerInterruptPending = false;
+
+        InvalidateTranslationCaches();
+        _registers.Pc = vectorBase + DecrementerExceptionVectorOffset;
+        return true;
     }
 
     private void ExecuteLoadStringWordImmediate(IMemoryBus memoryBus, PowerPcInstruction instruction)
@@ -2980,6 +3459,10 @@ public sealed class PowerPc32CpuCore : ICpuCore
                 break;
             case CounterRegisterSpr:
                 _registers.Ctr = value;
+                break;
+            case DecrementerRegisterSpr:
+                _extendedSpr[spr] = value;
+                _decrementerInterruptPending = false;
                 break;
             case Mpc8xxInstructionControlSpr:
                 _extendedSpr[spr] = value;
@@ -3418,6 +3901,13 @@ public sealed class PowerPc32CpuCore : ICpuCore
 
         _registers.Cr &= (uint)mask;
         _registers.Cr |= (crField & 0xFu) << shift;
+    }
+
+    private uint ReadCrField(int fieldIndex)
+    {
+        var clampedFieldIndex = Math.Clamp(fieldIndex, 0, 7);
+        var shift = (7 - clampedFieldIndex) * 4;
+        return (_registers.Cr >> shift) & 0xFu;
     }
 
     private static uint RotateLeft(uint value, int shift)

@@ -10,6 +10,7 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
     private readonly IPowerPcSupervisorCallHandler _innerHandler;
     private readonly int _maxTraceEntries;
     private readonly bool _captureConsoleOutput;
+    private readonly bool _includePutCharacterInTrace;
     private readonly Dictionary<uint, long> _serviceCounters = new();
     private readonly Dictionary<PowerPcSupervisorSubcallKey, long> _subserviceCounters = new();
     private readonly StringBuilder _consoleOutput = new();
@@ -18,7 +19,8 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
     public PowerPcTracingSupervisorCallHandler(
         IPowerPcSupervisorCallHandler innerHandler,
         int maxTraceEntries = 4096,
-        bool captureConsoleOutput = true)
+        bool captureConsoleOutput = true,
+        bool includePutCharacterInTrace = false)
     {
         _innerHandler = innerHandler
             ?? throw new ArgumentNullException(nameof(innerHandler));
@@ -28,6 +30,7 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
                 nameof(maxTraceEntries),
                 "Maximum trace entries must be non-negative.");
         _captureConsoleOutput = captureConsoleOutput;
+        _includePutCharacterInTrace = includePutCharacterInTrace;
     }
 
     public IReadOnlyDictionary<uint, long> ServiceCounters => _serviceCounters;
@@ -62,7 +65,7 @@ public sealed class PowerPcTracingSupervisorCallHandler : IPowerPcSupervisorCall
 
         var result = _innerHandler.Handle(context);
 
-        if (context.ServiceCode != PutCharacterService &&
+        if ((context.ServiceCode != PutCharacterService || _includePutCharacterInTrace) &&
             _maxTraceEntries > 0 &&
             _callTrace.Count < _maxTraceEntries)
         {

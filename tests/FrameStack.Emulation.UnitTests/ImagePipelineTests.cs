@@ -136,7 +136,7 @@ public sealed class ImagePipelineTests
         var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
 
         Assert.Equal(0x80006000u, powerPc.Registers[1]);
-        Assert.Equal(1u, powerPc.Registers[3]);
+        Assert.Equal(2u, powerPc.Registers[3]);
         Assert.Equal(0x8000BD00u, powerPc.Registers[4]);
         Assert.Equal(0u, powerPc.Registers.Lr);
         Assert.False(powerPc.NullProgramCounterRedirectEnabled);
@@ -164,8 +164,10 @@ public sealed class ImagePipelineTests
         mappedBus.WriteByte(0x6740_001C, 0x14);
         var secondBitSample = mappedBus.ReadByte(0x6740_001C);
         mappedBus.WriteByte(0x6740_001C, 0x10);
+        mappedBus.WriteByte(0xFFE0_0000, 0x41);
 
         Assert.Equal((byte)0x80, mappedBus.ReadByte(0x6740_0014));
+        Assert.Equal((byte)0x70, mappedBus.ReadByte(0xFFE0_0005));
         Assert.True((firstBitSample & 0x80) != 0);
         Assert.True((secondBitSample & 0x80) == 0);
     }
@@ -272,6 +274,7 @@ public sealed class ImagePipelineTests
         Assert.Equal(0x60008000u, state.Machine.ReadUInt32(0x00000004));
         Assert.Equal(0x7C0903A6u, state.Machine.ReadUInt32(0x00000008));
         Assert.Equal(0x4E800420u, state.Machine.ReadUInt32(0x0000000C));
+        Assert.Equal(0x4C000064u, state.Machine.ReadUInt32(0x00000900));
 
         var summary = state.Machine.Run(instructionBudget: 4);
 
@@ -298,6 +301,30 @@ public sealed class ImagePipelineTests
 
         Assert.Equal(2, summary.ExecutedInstructions);
         Assert.Equal(128u * 1024u * 1024u, powerPc.Registers[3]);
+    }
+
+    [Fact]
+    public void BootstrapShouldExposeCiscoC2600HardwarePlatformIdViaSupervisorServiceSeven()
+    {
+        var bootstrapper = new RuntimeImageBootstrapper(
+            new BinaryImageAnalyzer(),
+            [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
+
+        var state = bootstrapper.Bootstrap(
+            runtimeHandle: "native-ppc-hw-platform-c2600",
+            imageBytes: CreateSparcTaggedPowerPcElf(ciscoFamily: "C2600"),
+            memoryMb: 128);
+
+        var powerPc = Assert.IsType<PowerPc32CpuCore>(state.CpuCore);
+        var result = powerPc.SupervisorCallHandler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x07,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0x8065_00AC,
+            Argument3: 0x0000_098B));
+
+        Assert.Equal(0x2Bu, result.ReturnValue);
     }
 
     [Fact]

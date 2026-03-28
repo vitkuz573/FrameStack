@@ -49,21 +49,27 @@ Console.WriteLine("BuildConfiguration: Release");
 var bootstrapper = new RuntimeImageBootstrapper(
     analyzer,
     [new Elf32ImageLoader(), new RawBinaryImageLoader()]);
-BufferedConsoleCharacterSink? consoleOutputSink = null;
+var consoleOutputSink = new BufferedConsoleCharacterSink();
 
 try
 {
     var state = bootstrapper.Bootstrap(
         runtimeHandle: "runner",
         imageBytes,
-        invocation.MemoryMb);
+        invocation.MemoryMb,
+        consoleTransmitSink: value =>
+        {
+            if (RunnerConsoleCharacterDecoder.TryDecode(value, out var character))
+            {
+                consoleOutputSink.Write(character);
+            }
+        });
 
     var powerPcCore = state.CpuCore as PowerPc32CpuCore;
 
     if (powerPcCore is not null)
     {
         powerPcCore.DynarecEnabled = !invocation.DisableDynarec;
-        consoleOutputSink = new BufferedConsoleCharacterSink();
         powerPcCore.SupervisorCallHandler = new RunnerConsoleOutputSupervisorCallHandler(
             powerPcCore.SupervisorCallHandler,
             consoleOutputSink.Write);
@@ -232,30 +238,38 @@ file sealed class RunnerConsoleOutputSupervisorCallHandler : IPowerPcSupervisorC
         if (context.ServiceCode == PutCharacterService)
         {
             var value = unchecked((byte)context.Argument0);
-            char? character = null;
 
-            switch (value)
+            if (RunnerConsoleCharacterDecoder.TryDecode(value, out var character))
             {
-                case (byte)'\r':
-                case (byte)'\n':
-                case (byte)'\t':
-                    character = (char)value;
-                    break;
-            }
-
-            if (!character.HasValue &&
-                value is >= 0x20 and <= 0x7E)
-            {
-                character = (char)value;
-            }
-
-            if (character.HasValue)
-            {
-                _consoleCharacterSink(character.Value);
+                _consoleCharacterSink(character);
             }
         }
 
         return _inner.Handle(context);
+    }
+}
+
+file static class RunnerConsoleCharacterDecoder
+{
+    public static bool TryDecode(byte value, out char character)
+    {
+        switch (value)
+        {
+            case (byte)'\r':
+            case (byte)'\n':
+            case (byte)'\t':
+                character = (char)value;
+                return true;
+        }
+
+        if (value is >= 0x20 and <= 0x7E)
+        {
+            character = (char)value;
+            return true;
+        }
+
+        character = default;
+        return false;
     }
 }
 

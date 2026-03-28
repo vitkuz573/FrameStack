@@ -85,6 +85,22 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
     }
 
     [Fact]
+    public void HandleShouldFallbackToReportedMemoryWhenProbeChunkQueryUsesContextPointer()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler(0x0800_0000);
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x04,
+            Argument0: 0x0050_0000,
+            Argument1: 0,
+            Argument2: 0x07FF_EF40,
+            Argument3: 0));
+
+        Assert.Equal(0x0800_0000u, result.ReturnValue);
+    }
+
+    [Fact]
     public void HandleShouldFallbackToReportedMemoryForNonZeroProbeMode()
     {
         var handler = new DefaultPowerPcSupervisorCallHandler(0x0800_0000);
@@ -98,6 +114,38 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 0));
 
         Assert.Equal(0x0800_0000u, result.ReturnValue);
+    }
+
+    [Fact]
+    public void HandleShouldReturnConfiguredHardwarePlatformIdForServiceSevenQuery()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler(hardwarePlatformId: 0x2B);
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x07,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0x8065_00AC,
+            Argument3: 0x0000_098B));
+
+        Assert.Equal(0x2Bu, result.ReturnValue);
+    }
+
+    [Fact]
+    public void HandleShouldReturnZeroForServiceSevenWhenHardwarePlatformIdIsNotConfigured()
+    {
+        var handler = new DefaultPowerPcSupervisorCallHandler();
+
+        var result = handler.Handle(new PowerPcSupervisorCallContext(
+            ProgramCounter: 0,
+            ServiceCode: 0x07,
+            Argument0: 0,
+            Argument1: 0,
+            Argument2: 0x8065_00AC,
+            Argument3: 0x0000_098B));
+
+        Assert.Equal(0u, result.ReturnValue);
     }
 
     [Fact]
@@ -124,7 +172,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
         var setResult = handler.Handle(new PowerPcSupervisorCallContext(
             ProgramCounter: 0,
             ServiceCode: 0x3B,
-            Argument0: 0x0000_0067,
+            Argument0: 0x0000_0014,
             Argument1: 0,
             Argument2: 0,
             Argument3: 0));
@@ -137,8 +185,8 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument2: 0,
             Argument3: 0));
 
-        Assert.Equal(103u, setResult.ReturnValue);
-        Assert.Equal(103u, readResult.ReturnValue);
+        Assert.Equal(120u, setResult.ReturnValue);
+        Assert.Equal(120u, readResult.ReturnValue);
     }
 
     [Fact]
@@ -163,7 +211,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 0));
 
         Assert.Equal(0u, setResult.ReturnValue);
-        Assert.Equal(20u, readResult.ReturnValue);
+        Assert.Equal(120u, readResult.ReturnValue);
     }
 
     [Theory]
@@ -182,7 +230,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument2: 0,
             Argument3: 0));
 
-        Assert.Equal(20u, result.ReturnValue);
+        Assert.Equal(120u, result.ReturnValue);
     }
 
     [Fact]
@@ -193,7 +241,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
         _ = handler.Handle(new PowerPcSupervisorCallContext(
             ProgramCounter: 0,
             ServiceCode: 0x3B,
-            Argument0: 0x0000_0067,
+            Argument0: 0x0000_0014,
             Argument1: 0,
             Argument2: 0,
             Argument3: 0));
@@ -215,7 +263,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 0));
 
         Assert.Equal(0u, resetResult.ReturnValue);
-        Assert.Equal(20u, readResult.ReturnValue);
+        Assert.Equal(120u, readResult.ReturnValue);
     }
 
     [Fact]
@@ -238,7 +286,7 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 0,
             TryWriteUInt32: writeWord));
 
-        Assert.Equal(0u, writes[0x1000]);
+        Assert.Equal(120u, writes[0x1000]);
         Assert.Equal(0u, writes[0x1004]);
         Assert.Equal(0x0000_8000u, writes[0x1008]);
         Assert.Equal(0x0091_0091u, writes[0x100C]);
@@ -264,8 +312,8 @@ public sealed class DefaultPowerPcSupervisorCallHandlerTests
             Argument3: 0,
             TryWriteUInt32: writeWord));
 
-        Assert.Equal(20u, result.ReturnValue);
-        Assert.Equal(20u, writes[0x2000]);
+        Assert.Equal(120u, result.ReturnValue);
+        Assert.Equal(120u, writes[0x2000]);
         Assert.Equal(0u, writes[0x2004]);
         Assert.Equal(0x0000_8000u, writes[0x2008]);
         Assert.Equal(0x0091_0091u, writes[0x200C]);

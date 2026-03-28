@@ -110,6 +110,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.StopAtProgramCounterHits);
         command.Options.Add(CliOptions.StopOnSupervisorService);
         command.Options.Add(CliOptions.SupervisorTraceMaxEvents);
+        command.Options.Add(CliOptions.SupervisorTraceIncludePutCharacter);
         command.Options.Add(CliOptions.StopOnSupervisorSignatures);
         command.Options.Add(CliOptions.StopOnSupervisorSignatureHits);
         command.Options.Add(CliOptions.TailLength);
@@ -121,6 +122,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.DynamicStopOnWatchWordChangeRequests);
         command.Options.Add(CliOptions.StopOnWatchWordChangeEffectiveAddresses);
         command.Options.Add(CliOptions.TraceWatch32Accesses);
+        command.Options.Add(CliOptions.TraceWatch32AllAddresses);
         command.Options.Add(CliOptions.TraceWatch32AccessesMaxEvents);
         command.Options.Add(CliOptions.TraceWatch32ProgramCounterRanges);
         command.Options.Add(CliOptions.TraceInstructionProgramCounterRanges);
@@ -373,6 +375,7 @@ internal static class ProbeCommandHandler
             stopAtProgramCounterHits,
             stopOnSupervisorService,
             supervisorTraceMaxEvents,
+            parseResult.GetValue(CliOptions.SupervisorTraceIncludePutCharacter),
             stopOnSupervisorSignatures,
             stopOnSupervisorSignatureHits,
             tailLength,
@@ -389,6 +392,7 @@ internal static class ProbeCommandHandler
             dynamicStopOnWatchWordChangeRequests,
             stopOnWatchWordChangeEffectiveAddresses.ToArray(),
             parseResult.GetValue(CliOptions.TraceWatch32Accesses),
+            parseResult.GetValue(CliOptions.TraceWatch32AllAddresses),
             traceWatch32AccessesMaxEvents,
             traceWatch32ProgramCounterRanges,
             traceInstructionProgramCounterRanges,
