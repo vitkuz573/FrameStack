@@ -128,6 +128,7 @@ internal static class ProbeCommandHandler
         command.Options.Add(CliOptions.TraceWatch32AllAddresses);
         command.Options.Add(CliOptions.TraceWatch32AccessesMaxEvents);
         command.Options.Add(CliOptions.TraceWatch32ProgramCounterRanges);
+        command.Options.Add(CliOptions.TraceWatch32AddressRanges);
         command.Options.Add(CliOptions.TraceInstructionProgramCounterRanges);
         command.Options.Add(CliOptions.TraceInstructionMaxEvents);
         command.Options.Add(CliOptions.TrackedProgramCounters);
@@ -319,6 +320,14 @@ internal static class ProbeCommandHandler
                 ParseAddressRange("--trace-watch32-pc-range", token));
         }
 
+        var traceWatch32AddressRanges = new List<AddressRange>();
+        foreach (var token in parseResult.GetValue(CliOptions.TraceWatch32AddressRanges) ?? [])
+        {
+            AddDistinct(
+                traceWatch32AddressRanges,
+                ParseAddressRange("--trace-watch32-ea-range", token));
+        }
+
         var traceInstructionProgramCounterRanges = new List<AddressRange>();
         foreach (var token in parseResult.GetValue(CliOptions.TraceInstructionProgramCounterRanges) ?? [])
         {
@@ -430,6 +439,7 @@ internal static class ProbeCommandHandler
             parseResult.GetValue(CliOptions.TraceWatch32AllAddresses),
             traceWatch32AccessesMaxEvents,
             traceWatch32ProgramCounterRanges,
+            traceWatch32AddressRanges,
             traceInstructionProgramCounterRanges,
             traceInstructionMaxEvents,
             trackedProgramCounters,

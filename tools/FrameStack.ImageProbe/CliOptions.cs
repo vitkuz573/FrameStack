@@ -196,6 +196,10 @@ internal static class CliOptions
         "--trace-watch32-pc-range",
         "Access trace program counter range <start>:<end>.");
 
+    internal static readonly Option<string[]> TraceWatch32AddressRanges = CreateManyValueOption(
+        "--trace-watch32-ea-range",
+        "Access trace effective address range <start>:<end>.");
+
     internal static readonly Option<string[]> TraceInstructionProgramCounterRanges = CreateManyValueOption(
         "--trace-insn-pc-range",
         "Instruction trace program counter range <start>:<end>.");

@@ -188,6 +188,12 @@ if (cliOptions.TraceWatch32ProgramCounterRanges.Count > 0)
         $"TraceWatch32PcRange: {string.Join(", ", cliOptions.TraceWatch32ProgramCounterRanges.Select(range => $"0x{range.Start:X8}:0x{range.End:X8}"))}");
 }
 
+if (cliOptions.TraceWatch32AddressRanges.Count > 0)
+{
+    Console.WriteLine(
+        $"TraceWatch32EaRange: {string.Join(", ", cliOptions.TraceWatch32AddressRanges.Select(range => $"0x{range.Start:X8}:0x{range.End:X8}"))}");
+}
+
 if (cliOptions.TraceInstructionProgramCounterRanges.Count > 0)
 {
     Console.WriteLine(
@@ -523,6 +529,7 @@ try
         cliOptions.TraceWatch32AllAddresses,
         cliOptions.TraceWatch32AccessesMaxEvents,
         cliOptions.TraceWatch32ProgramCounterRanges,
+        cliOptions.TraceWatch32AddressRanges,
         cliOptions.TraceInstructionProgramCounterRanges,
         cliOptions.TraceInstructionMaxEvents,
         powerPcCore,
@@ -1462,6 +1469,7 @@ static TracedRunResult RunBudgetWithTrace(
     bool traceWatchWordAllAddresses,
     int traceWatchWordAccessesMaxEvents,
     IReadOnlyList<AddressRange> traceWatchWordProgramCounterRanges,
+    IReadOnlyList<AddressRange> traceWatchWordAddressRanges,
     IReadOnlyList<AddressRange> traceInstructionProgramCounterRanges,
     int traceInstructionMaxEvents,
     PowerPc32CpuCore? powerPcCore,
@@ -1549,18 +1557,24 @@ static TracedRunResult RunBudgetWithTrace(
             ? currentStopOnWatchWordChangeAddresses.ToHashSet()
             : null;
         IReadOnlyList<AddressRange>? traceWatchAddressRanges = null;
+        IReadOnlyList<AddressRange>? traceWatchAddressRangeFilters = null;
         Action<PowerPcMemoryAccessTraceEntry>? priorMemoryTraceSink = null;
         var traceAllAddresses = traceWatchWordAllAddresses;
         var canTraceMemoryAccesses = powerPcCore is not null &&
                                      memoryAccessEvents is not null &&
                                      memoryAccessEvents.Count < traceWatchWordAccessesMaxEvents &&
-                                     (traceAllAddresses || currentTraceWatchWordAddresses.Length > 0);
+                                     (traceAllAddresses ||
+                                      currentTraceWatchWordAddresses.Length > 0 ||
+                                      traceWatchWordAddressRanges.Count > 0);
 
         if (canTraceMemoryAccesses)
         {
             traceWatchAddressRanges = traceAllAddresses
                 ? null
                 : BuildWordWatchRanges(currentTraceWatchWordAddresses);
+            traceWatchAddressRangeFilters = traceWatchWordAddressRanges.Count > 0
+                ? traceWatchWordAddressRanges
+                : null;
             priorMemoryTraceSink = powerPcCore!.MemoryAccessTraceSink;
             powerPcCore.MemoryAccessTraceSink = accessEntry =>
             {
@@ -1574,6 +1588,15 @@ static TracedRunResult RunBudgetWithTrace(
                         accessEntry.PhysicalAddress,
                         accessEntry.SizeBytes,
                         traceWatchAddressRanges))
+                {
+                    return;
+                }
+
+                if (traceWatchAddressRangeFilters is not null &&
+                    !IsMemoryAccessWithinRanges(
+                        accessEntry.PhysicalAddress,
+                        accessEntry.SizeBytes,
+                        traceWatchAddressRangeFilters))
                 {
                     return;
                 }
@@ -4028,6 +4051,7 @@ sealed record ProbeCliOptions(
     bool TraceWatch32AllAddresses,
     int TraceWatch32AccessesMaxEvents,
     IReadOnlyList<AddressRange> TraceWatch32ProgramCounterRanges,
+    IReadOnlyList<AddressRange> TraceWatch32AddressRanges,
     IReadOnlyList<AddressRange> TraceInstructionProgramCounterRanges,
     int TraceInstructionMaxEvents,
     IReadOnlyList<uint> TrackedProgramCounters,
