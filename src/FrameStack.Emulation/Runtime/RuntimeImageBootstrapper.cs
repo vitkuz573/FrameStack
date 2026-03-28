@@ -17,8 +17,6 @@ public sealed class RuntimeImageBootstrapper
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
     private const uint CiscoC2600IoMemoryDescriptorAddress = 0x8336_67E0;
     private const uint CiscoC2600IoMemoryDescriptorSizeBytes = 0x10;
-    private const uint CiscoC2600NvramSizeWordAddress = 0x830E_04D0;
-    private const uint CiscoC2600NvramSizeCachedWordAddress = 0x830E_045C;
 
     private readonly IImageAnalyzer _imageAnalyzer;
     private readonly IReadOnlyList<IImageLoader> _imageLoaders;
@@ -237,9 +235,9 @@ public sealed class RuntimeImageBootstrapper
             return;
         }
 
-        memoryBus.ProtectWriteRange(CiscoC2600NvramSizeWordAddress, sizeof(uint));
-        memoryBus.ProtectWriteRange(CiscoC2600NvramSizeCachedWordAddress, sizeof(uint));
-
+        // Do not protect C2600 NVRAM sizing words during bootstrap.
+        // They live inside the ROM's decompression/checksum target region and
+        // early write-protection corrupts the unpacked payload.
         memoryBus.ProtectWriteRange(
             CiscoC2600IoMemoryDescriptorAddress,
             CiscoC2600IoMemoryDescriptorSizeBytes);

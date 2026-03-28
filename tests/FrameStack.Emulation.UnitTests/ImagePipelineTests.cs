@@ -371,7 +371,7 @@ public sealed class ImagePipelineTests
     }
 
     [Fact]
-    public void BootstrapShouldProtectCiscoC2600NvramSizeWordsWithoutPreseedingValues()
+    public void BootstrapShouldLeaveCiscoC2600NvramSizeWordsWritableAtBootstrap()
     {
         var bootstrapper = new RuntimeImageBootstrapper(
             new BinaryImageAnalyzer(),
@@ -383,14 +383,11 @@ public sealed class ImagePipelineTests
             memoryMb: 128);
 
         var memoryBus = ResolveSparseMemoryBus(state.Machine.MemoryBus);
-        var initialMainWord = memoryBus.ReadUInt32(0x830E_04D0);
-        var initialCachedWord = memoryBus.ReadUInt32(0x830E_045C);
-
         memoryBus.WriteUInt32(0x830E_04D0, 0x0000_2000);
         memoryBus.WriteUInt32(0x830E_045C, 0x0000_2000);
 
-        Assert.Equal(initialMainWord, memoryBus.ReadUInt32(0x830E_04D0));
-        Assert.Equal(initialCachedWord, memoryBus.ReadUInt32(0x830E_045C));
+        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_04D0));
+        Assert.Equal(0x0000_2000u, memoryBus.ReadUInt32(0x830E_045C));
     }
 
     [Fact]
