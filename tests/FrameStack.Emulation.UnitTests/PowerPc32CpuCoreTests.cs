@@ -1874,7 +1874,7 @@ public sealed class PowerPc32CpuCoreTests
         Assert.Equal(4096, executed);
         Assert.Equal(0x1000u, cpu.ProgramCounter);
         Assert.Equal(0u, memory.ReadUInt32(0x830E_3D44));
-        Assert.True(memory.ReadUInt32(0x830E_3D94) >= 4u);
+        Assert.True(memory.ReadUInt32(0x830E_3D94) >= 390_000u);
     }
 
     [Fact]
@@ -1894,6 +1894,21 @@ public sealed class PowerPc32CpuCoreTests
 
         Assert.Equal(0u, memory.ReadUInt32(0x830E_3D44));
         Assert.Equal(0u, memory.ReadUInt32(0x830E_3D94));
+    }
+
+    [Fact]
+    public void ReadSprShouldReturnConfiguredMpc8xxImmrDefaultWhenUnset()
+    {
+        var cpu = new PowerPc32CpuCore
+        {
+            DefaultMpc8xxInternalMemoryMapRegister = 0xFFE0_0000
+        };
+
+        Assert.Equal(0xFFE0_0000u, cpu.ReadSpecialPurposeRegister(638));
+
+        cpu.WriteSpecialPurposeRegister(638, 0xFFF0_0000);
+
+        Assert.Equal(0xFFF0_0000u, cpu.ReadSpecialPurposeRegister(638));
     }
 
     [Fact]

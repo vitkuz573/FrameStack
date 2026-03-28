@@ -17,6 +17,8 @@ public sealed class RuntimeImageBootstrapper
     private const uint CiscoC2600InitialStackPointer = 0x8000_6000;
     private const uint CiscoC2600IoMemoryDescriptorAddress = 0x8336_67E0;
     private const uint CiscoC2600IoMemoryDescriptorSizeBytes = 0x10;
+    private const int Mpc8xxInternalMemoryMapRegisterSpr = 638;
+    private const uint CiscoC2600InternalMemoryMapRegister = 0xFFE0_0000;
 
     private readonly IImageAnalyzer _imageAnalyzer;
     private readonly IReadOnlyList<IImageLoader> _imageLoaders;
@@ -222,6 +224,10 @@ public sealed class RuntimeImageBootstrapper
             return;
         }
 
+        powerPcCore.DefaultMpc8xxInternalMemoryMapRegister = CiscoC2600InternalMemoryMapRegister;
+        powerPcCore.WriteSpecialPurposeRegister(
+            Mpc8xxInternalMemoryMapRegisterSpr,
+            CiscoC2600InternalMemoryMapRegister);
         powerPcCore.Registers[3] = CiscoC2600BootMode;
         powerPcCore.Registers[4] = CiscoC2600BootInfoPointer;
     }

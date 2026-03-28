@@ -139,6 +139,8 @@ public sealed class ImagePipelineTests
         Assert.Equal(2u, powerPc.Registers[3]);
         Assert.Equal(0x8000BD00u, powerPc.Registers[4]);
         Assert.Equal(0u, powerPc.Registers.Lr);
+        Assert.Equal(0xFFE0_0000u, powerPc.DefaultMpc8xxInternalMemoryMapRegister);
+        Assert.Equal(0xFFE0_0000u, powerPc.ReadSpecialPurposeRegister(638));
         Assert.False(powerPc.NullProgramCounterRedirectEnabled);
     }
 

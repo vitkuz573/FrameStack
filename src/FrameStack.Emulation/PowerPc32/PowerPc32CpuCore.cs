@@ -9,6 +9,7 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const int LinkRegisterSpr = 8;
     private const int CounterRegisterSpr = 9;
     private const int DecrementerRegisterSpr = 22;
+    private const int Mpc8xxInternalMemoryMapRegisterSpr = 638; // IMMR
     private const int SaveRestoreRegister0Spr = 26;
     private const int SaveRestoreRegister1Spr = 27;
     private const int Mpc8xxInstructionControlSpr = 784;
@@ -47,7 +48,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
     private const uint CiscoC2600TimeLowPointerAddress = 0x82EB_0648;
     private const uint CiscoC2600TimeCellRegionStart = 0x830E_0000;
     private const uint CiscoC2600TimeCellRegionEnd = 0x830F_0000;
-    private const ulong CiscoC2600TimeCellUpdateIntervalMask = 0x0000_03FF;
+    private const ulong CiscoC2600TimeCellUpdateIntervalMask = 0x0000_003F;
+    private const ulong CiscoC2600TimeCellTicksPerInstruction = 96;
     private const uint ExceptionMachineStateClearMask =
         MachineStateExternalInterruptEnableMask |
         MachineStateDataRelocationMask |
@@ -207,6 +209,8 @@ public sealed class PowerPc32CpuCore : ICpuCore
             InvalidateTranslationCaches();
         }
     }
+
+    public uint DefaultMpc8xxInternalMemoryMapRegister { get; set; }
 
     public Action<PowerPcMemoryAccessTraceEntry>? MemoryAccessTraceSink { get; set; }
 
@@ -3338,7 +3342,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
         }
 
         var currentTicks = ((ulong)currentHighWord << 32) | currentLowWord;
-        var scaledTimeBaseTicks = _timeBaseCounter >> 10;
+        // Cisco C2600 time cells are consumed as 32.32 fixed-point wall-clock ticks.
+        // Advance them from instruction time at a coarse cycle-derived scale.
+        var scaledTimeBaseTicks = _timeBaseCounter * CiscoC2600TimeCellTicksPerInstruction;
         var nextTicks = scaledTimeBaseTicks > currentTicks
             ? scaledTimeBaseTicks
             : currentTicks + 1;
@@ -3494,6 +3500,9 @@ public sealed class PowerPc32CpuCore : ICpuCore
             CounterRegisterSpr => _registers.Ctr,
             Mpc8xxTableWalkBaseSpr => ComputeMpc8xxLevelOneDescriptorPointer(),
             Mpc8xxDataTableWalkControlSpr => ComputeMpc8xxLevelTwoDescriptorPointer(),
+            Mpc8xxInternalMemoryMapRegisterSpr => _extendedSpr.TryGetValue(spr, out var immr)
+                ? immr
+                : DefaultMpc8xxInternalMemoryMapRegister,
             _ => _extendedSpr.GetValueOrDefault(spr, 0u)
         };
     }
