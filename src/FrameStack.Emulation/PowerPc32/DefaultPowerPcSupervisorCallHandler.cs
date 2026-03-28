@@ -13,6 +13,10 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private const uint QueryHardwareProfileService = 0x07;
     private const uint QueryCiscoC2600NvramCapacityService = 0x18;
     private const uint QueryCiscoC2600NvramReservedService = 0x2F;
+    private const uint LaunchDecompressedIosService = 0x2B;
+    private const uint LaunchDecompressedIosSubCommand = 0x17;
+    private const uint CiscoC2600DecompressedIosEntryPoint = 0x8100_0000;
+    private const uint CiscoC2600GlueMagicWordAddress = 0x830D_FCB4;
     private const uint BootstrapIoMemoryProfileService = 0x2C;
     private const uint QueryIoMemoryProfileService = 0x3A;
     private const uint SetIoMemoryProfileService = 0x3B;
@@ -145,6 +149,29 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
             _manualIoMemoryProfilePercent = _defaultIoMemoryProfilePercent;
             _hasManualIoMemoryProfile = false;
             return new PowerPcSupervisorCallResult(ReturnValue: 0);
+        }
+
+        if (context.ServiceCode == LaunchDecompressedIosService &&
+            context.Argument0 == LaunchDecompressedIosSubCommand &&
+            _hardwarePlatformId == CiscoC2600HardwarePlatformId)
+        {
+            if (!_ciscoC2600NvramSizeWordsSeeded)
+            {
+                var primaryWritten = context.TryWriteDataUInt32(
+                    CiscoC2600NvramSizeWordAddress,
+                    CiscoC2600DefaultNvramSizeBytes);
+                var cachedWritten = context.TryWriteDataUInt32(
+                    CiscoC2600NvramSizeCachedWordAddress,
+                    CiscoC2600DefaultNvramSizeBytes);
+
+                _ciscoC2600NvramSizeWordsSeeded = primaryWritten && cachedWritten;
+            }
+
+            context.TryWriteDataUInt32(CiscoC2600GlueMagicWordAddress, 0);
+
+            return new PowerPcSupervisorCallResult(
+                ReturnValue: 0,
+                NextProgramCounter: CiscoC2600DecompressedIosEntryPoint);
         }
 
         // Most firmware wrappers expect zero on success.
