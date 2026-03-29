@@ -470,6 +470,15 @@ public sealed class PowerPc32CpuCore : ICpuCore
         {
             _decrementerValue = restoredDecrementer;
             _hasDecrementer = true;
+
+            // On real hardware the decrementer exception stays pending while DEC is negative.
+            // Restoring a checkpoint with an already-negative DEC must re-arm the latch so that
+            // the interrupt fires as soon as EE is enabled, rather than waiting for the next
+            // full wrap-around (~2^32 ticks).
+            if ((restoredDecrementer & 0x8000_0000u) != 0)
+            {
+                _decrementerInterruptPending = true;
+            }
         }
         else
         {

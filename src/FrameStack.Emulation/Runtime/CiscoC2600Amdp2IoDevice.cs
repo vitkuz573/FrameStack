@@ -35,9 +35,12 @@ public sealed class CiscoC2600Amdp2IoDevice : IMemoryMappedDevice
         BaseAddress = baseAddress;
         SizeBytes = DefaultMappedSizeBytes;
         _registerWindow = new byte[checked((int)SizeBytes)];
-        _adapterRegisterBank[0] = DefaultAmdp2DeviceId;
 
-        StoreUInt32(AdapterDataOffset, DefaultAmdp2DeviceId);
+        // Before software reset the chip presents its PCI VID/DID through RDP with RAP=0.
+        // IOS reads this value to verify it is talking to an Am79C971 before starting INIT.
+        // After IOS writes STOP (bit 2) the state machine below transitions to 0x0004.
+        _adapterRegisterBank[ControlStatusRegister0] = DefaultAmdp2DeviceId;
+
         StoreUInt32(PresenceStatusOffset, _presenceStatus);
     }
 
@@ -210,20 +213,14 @@ public sealed class CiscoC2600Amdp2IoDevice : IMemoryMappedDevice
             : 0u;
     }
 
-    private uint ResolveAdapterDataWriteValue(uint command, uint value)
+    private static uint ResolveAdapterDataWriteValue(uint command, uint value)
     {
         if (command != ControlStatusRegister0)
         {
             return value;
         }
 
-        var existing = _adapterRegisterBank.TryGetValue(ControlStatusRegister0, out var stored)
-            ? stored
-            : DefaultAmdp2DeviceId;
-        var highHalf = existing & 0xFFFF_0000u;
-        var lowHalf = ResolveControlStatusRegister0Write(value);
-
-        return highHalf | lowHalf;
+        return ResolveControlStatusRegister0Write(value);
     }
 
     private static uint ResolveControlStatusRegister0Write(uint value)

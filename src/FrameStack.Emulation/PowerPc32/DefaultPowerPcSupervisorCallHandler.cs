@@ -37,6 +37,7 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
     private uint _manualIoMemoryProfilePercent;
     private bool _hasManualIoMemoryProfile;
     private bool _ciscoC2600NvramSizeWordsSeeded;
+    private bool _iosHasLaunched;
 
     public DefaultPowerPcSupervisorCallHandler(
         uint reportedMemoryBytes = DefaultReportedMemoryBytes,
@@ -169,9 +170,16 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
 
             context.TryWriteDataUInt32(CiscoC2600GlueMagicWordAddress, 0);
 
-            return new PowerPcSupervisorCallResult(
-                ReturnValue: 0,
-                NextProgramCounter: CiscoC2600DecompressedIosEntryPoint);
+            if (!_iosHasLaunched)
+            {
+                _iosHasLaunched = true;
+                return new PowerPcSupervisorCallResult(
+                    ReturnValue: 0,
+                    NextProgramCounter: CiscoC2600DecompressedIosEntryPoint);
+            }
+
+            // Subsequent calls from ROM re-launch path: return 0 without redirecting.
+            return new PowerPcSupervisorCallResult(ReturnValue: 0);
         }
 
         // Most firmware wrappers expect zero on success.
@@ -188,10 +196,10 @@ public sealed class DefaultPowerPcSupervisorCallHandler : IPowerPcSupervisorCall
 
         // The sizing wrapper observed in C2600 IOS 12.3(1a) issues
         // svc 0x18/0x2F with this descriptor layout.
+        // A3 carries IMMR (0xFFE00000) in the ROM calling convention — not zero.
         return context.Argument0 == CiscoC2600NvramSizingQueryArg0 &&
                context.Argument1 >= 0x8000_0000 &&
-               context.Argument2 >= 0x8000_0000 &&
-               context.Argument3 == 0;
+               context.Argument2 >= 0x8000_0000;
     }
 
     private void TrySeedCiscoC2600NvramSizeWords(PowerPcSupervisorCallContext context)
